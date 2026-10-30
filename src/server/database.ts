@@ -90,7 +90,20 @@ class RadarDatabase {
 
   // Settings
   public getSettings(): AppSettings {
-    return this.data.settings;
+    const s = this.data.settings;
+    return {
+      ...s,
+      instagram: {
+        ...s.instagram,
+        accessToken: s.instagram?.accessToken || process.env.META_ACCESS_TOKEN || '',
+        pageId: s.instagram?.pageId || process.env.META_PAGE_ID || '',
+      },
+      telegram: {
+        ...s.telegram,
+        botToken: s.telegram?.botToken || process.env.TELEGRAM_BOT_TOKEN || '',
+        chatId: s.telegram?.chatId || process.env.TELEGRAM_CHAT_ID || '',
+      }
+    };
   }
 
   public updateSettings(partial: Partial<AppSettings>): AppSettings {

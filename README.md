@@ -35,50 +35,90 @@ O projeto é dividido em módulos independentes:
 
 ---
 
-## 📦 Como Executar Localmente
+## 📦 Como Executar Localmente no Windows
 
-### Opção 1: Aplicação Web Integrada (Node/React/Express)
-```bash
-# 1. Instalar dependências
+### Pré-requisitos
+- Node.js v18+ (recomendado v22.x LTS).
+- NPM v10+ (já incluso com o Node.js).
+- Windows PowerShell ou prompt de comando.
+
+### Passo a Passo
+
+```powershell
+# 1. Clonar ou navegar até a pasta do projeto
+cd g:\Projetos\radarvibz-main
+
+# 2. Criar arquivo de configuração local a partir do exemplo
+Copy-Item .env.example .env
+
+# 3. Instalar dependências
 npm install
 
-# 2. Executar em modo de desenvolvimento
+# 4. Executar os testes automatizados
+npm test
+
+# 5. Iniciar o servidor de desenvolvimento (Node.js + Vite)
 npm run dev
-# Acesse em: http://localhost:3000
 ```
 
-### Opção 2: Backend Python FastAPI com PostgreSQL (Docker)
-```bash
-# Subir todo o ambiente com Postgres, FastAPI e Frontend
-docker-compose up --build
-# Backend FastAPI: http://localhost:8000/docs
-# Frontend: http://localhost:3000
-```
+Após iniciar, acesse o painel no navegador:
+👉 **http://localhost:3000** (ou `http://127.0.0.1:3000`)
 
 ---
 
-## 🔑 Configuração das APIs Externas
+## 🔑 Configuração de Variáveis de Ambiente & APIs Externas
 
-### 1. Google Gemini API
-- Obtenha sua chave no [Google AI Studio](https://aistudio.google.com).
-- No arquivo `.env`:
-  ```env
-  GEMINI_API_KEY="sua_chave_aqui"
-  ```
-- O Radar Vibz utiliza o modelo recomendado `gemini-3.8-flash` no backend com cabeçalho `User-Agent: aistudio-build`.
+O Radar Vibz foi concebido com **resiliência operacional total**: o sistema é 100% funcional no **modo de demonstração** mesmo que nenhuma credencial externa seja informada.
 
-### 2. Meta Instagram Graph API
-- Acesse o Meta for Developers e crie um App do tipo "Business".
-- Vincule sua Página do Facebook conectada à conta comercial do Instagram.
-- Obtenha o Access Token de longa duração com as permissões:
-  - `instagram_basic`
-  - `pages_show_list`
-- Preencha o `Page ID` e o `Access Token` na aba **Configurações > Meta Instagram API**.
+Para ativar os serviços em ambiente real, preencha as variáveis no arquivo `.env` ou configure diretamente pela aba **Configurações** na interface:
 
-### 3. Telegram Bot API
-- Crie um bot no Telegram falando com `@BotFather` e obtenha o `Bot Token`.
-- Adicione o bot ao grupo comercial do Vibz e obtenha o `Chat ID` (ex: `-100...`).
-- Preencha os campos na aba **Configurações > Telegram** e clique em **Disparar Mensagem de Teste**.
+### 1. Google Gemini AI (`GEMINI_API_KEY`)
+- **Finalidade:** Análise semântica profunda de legendas, identificação de eventos futuros, extração de artistas, data/horário e cálculo de oportunidade comercial para o Vibz.
+- **Como obter:**
+  1. Acesse o [Google AI Studio](https://aistudio.google.com/app/apikey).
+  2. Clique em **Create API Key** em um projeto Google Cloud.
+  3. Copie a chave gerada e atribua à variável:
+     ```env
+     GEMINI_API_KEY="AIzaSy..."
+     ```
+- **Modo Demonstração / Fallback:** Caso a chave não esteja configurada ou a quota seja excedida, o sistema aciona de forma transparente o **motor heurístico de regras**, garantindo classificação contínua de eventos sem interromper o fluxo operacional.
+
+### 2. Meta Instagram Graph API (`META_ACCESS_TOKEN` e `META_PAGE_ID`)
+- **Finalidade:** Consulta oficial e periódica a perfis comerciais e de criadores no Instagram através da funcionalidade oficial *Business Discovery* da Meta (respeitando integralmente as diretrizes de privacidade e termos da plataforma).
+- **Como obter:**
+  1. Acesse o portal [Meta for Developers](https://developers.facebook.com) e crie um aplicativo corporativo do tipo **Business**.
+  2. Adicione os produtos **Instagram Graph API** e **Facebook Login for Business**.
+  3. Vincule a Página do Facebook que possui vínculo confirmado com sua conta profissional do Instagram.
+  4. Localize o **ID da Página** nas configurações da página no Facebook e atribua a:
+     ```env
+     META_PAGE_ID="123456789012345"
+     ```
+  5. Gere um **Token de Acesso do Usuário do Sistema** (ou token de longa duração) no Meta Business Suite com os escopos:
+     - `instagram_basic`
+     - `pages_show_list`
+     - `pages_read_engagement`
+  6. Atribua o token gerado a:
+     ```env
+     META_ACCESS_TOKEN="EAA..."
+     ```
+- **Modo Demonstração / Fallback:** Se não configuradas, o provedor ativo mantém-se como `demo_simulation`, gerando publicações simuladas contextualizadas com estabelecimentos e eventos do Sudoeste Baiano.
+
+### 3. Telegram Bot API (`TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID`)
+- **Finalidade:** Disparo em tempo real de cards editoriais padronizados para o canal ou grupo comercial da equipe do Vibz Eventos sempre que uma oportunidade de alta relevância é detectada.
+- **Como obter:**
+  1. No aplicativo do Telegram, inicie uma conversa com [@BotFather](https://t.me/botfather).
+  2. Envie `/newbot` e siga as instruções para definir o nome e o username do seu bot.
+  3. O BotFather fornecerá o token de acesso HTTP:
+     ```env
+     TELEGRAM_BOT_TOKEN="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
+     ```
+  4. Crie um grupo ou canal para o comercial do Vibz e adicione o bot recém-criado como administrador (com permissão para postar mensagens).
+  5. Obtenha o identificador numérico do grupo (`TELEGRAM_CHAT_ID`). Você pode enviar uma mensagem no grupo e consultar `https://api.telegram.org/bot<SEU_TOKEN>/getUpdates` ou adicionar temporariamente o bot auxiliar `@userinfobot`.
+  6. Atribua o ID à variável (atenção: IDs de supergrupos/canais iniciam com `-100`):
+     ```env
+     TELEGRAM_CHAT_ID="-1001234567890"
+     ```
+- **Modo Demonstração / Fallback:** Se não configurados, o serviço opera em modo simulado (`simulated: true`), registrando a formatação exata da mensagem nos registros de auditoria do sistema sem disparar erros.
 
 ---
 

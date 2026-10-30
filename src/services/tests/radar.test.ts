@@ -108,6 +108,9 @@ test('Descoberta: Aprovação de candidato o transfere para perfis monitorados',
   const createdProfile = db.getProfileByUsername(testUser);
   assert.ok(createdProfile);
   assert.equal(createdProfile?.monitoringStatus, 'active');
+
+  // Limpeza para manter banco consistente
+  db.deleteProfile(createdProfile.id);
 });
 
 test('Telegram: Formatação da notificação respeita padrão editorial do Radar Vibz', () => {
