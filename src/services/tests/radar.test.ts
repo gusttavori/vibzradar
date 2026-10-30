@@ -8,6 +8,8 @@ import assert from 'node:assert/strict';
 import { db } from '../../server/database';
 import { aiAnalysisService } from '../../server/services/publicationAnalysisService';
 import { notificationService } from '../../server/services/notificationService';
+import { monitoringEngine } from '../../server/services/monitoringEngine';
+import { schedulerService, getCronExpressionForMinutes } from '../../server/services/schedulerService';
 import { Opportunity } from '../../types/radar';
 
 test('Perfis: Previne cadastro de perfis duplicados com mesmo nome de usuário', () => {
@@ -143,4 +145,94 @@ test('Telegram: Formatação da notificação respeita padrão editorial do Rada
   assert.match(message, /@arena_teste/);
   assert.match(message, /Micareta Universitária Conquista/);
   assert.match(message, /ALTA/);
+});
+
+test('Deduplicação Persistente: Impede reenvio de notificações gravando estado no banco JSON', async () => {
+  const oppId = `opp_dedup_test_${Date.now()}`;
+  const opp = db.createOpportunity({
+    publicationId: `pub_${oppId}`,
+    profileId: 'prof-01',
+    username: 'arena_sudoeste_eventos',
+    eventName: 'Show de Teste Deduplicação Persistente',
+    category: 'Show musical',
+    eventDate: '2026-12-31',
+    eventTime: '21:00',
+    city: 'Vitória da Conquista',
+    venue: 'Arena Sudoeste',
+    artists: ['Artista Teste'],
+    summary: 'Evento de teste para validação de deduplicação no banco JSON.',
+    originalUrl: 'https://instagram.com/p/test_dedup',
+    relevance: 'high',
+    commercialPotential: 'Validação de deduplicação.',
+    suggestedAction: 'Validar persistência.',
+    status: 'Nova',
+    internalNotes: 'Teste unitário Etapa 2',
+    isDemo: true
+  });
+
+  // 1. Inicialmente não deve constar como notificado
+  assert.equal(db.isOpportunityNotified(opp.id), false);
+
+  // 2. Dispara notificação (em modo simulado)
+  const firstDispatch = await notificationService.notifyOpportunity(opp);
+  assert.equal(firstDispatch.success, true);
+
+  // 3. Verifica se foi gravado persistentemente no banco JSON
+  assert.equal(db.isOpportunityNotified(opp.id), true);
+  assert.ok(db.getNotifiedOpportunityIds().includes(opp.id));
+
+  // 4. Tentativa de reenvio deve ser rejeitada pela checagem no JSON
+  const secondDispatch = await notificationService.notifyOpportunity(opp);
+  assert.equal(secondDispatch.success, false);
+  assert.match(secondDispatch.message, /deduplicada no banco JSON/i);
+});
+
+test('Trava de Concorrência (Lock): Bloqueia execuções simultâneas e libera no bloco finally', async () => {
+  assert.equal(monitoringEngine.isLocked(), false);
+
+  // Simula ativação do Lock de concorrência
+  (monitoringEngine as unknown as { isMonitoring: boolean }).isMonitoring = true;
+  assert.equal(monitoringEngine.isLocked(), true);
+
+  // Disparo manual deve lançar erro
+  await assert.rejects(
+    async () => {
+      await monitoringEngine.runCycleNow(false);
+    },
+    { message: /já está em andamento/i }
+  );
+
+  // Disparo agendado deve pular a execução e retornar skipped: true
+  const scheduledSkip = await monitoringEngine.runCycleNow(true);
+  assert.equal(scheduledSkip.skipped, true);
+  assert.match(scheduledSkip.details, /trava de concorrência \(Lock\) ativa/i);
+
+  // Libera a trava e verifica execução normal com liberação garantida no finally
+  (monitoringEngine as unknown as { isMonitoring: boolean }).isMonitoring = false;
+  assert.equal(monitoringEngine.isLocked(), false);
+
+  const normalRun = await monitoringEngine.runCycleNow();
+  assert.equal(normalRun.skipped, undefined);
+  assert.equal(monitoringEngine.isLocked(), false); // Garantido pelo bloco finally
+});
+
+test('Agendador (Scheduler): Converte intervalos para cron e gerencia ciclo de vida', () => {
+  // Conversão de intervalos
+  assert.equal(getCronExpressionForMinutes(15), '*/15 * * * *');
+  assert.equal(getCronExpressionForMinutes(30), '*/30 * * * *');
+  assert.equal(getCronExpressionForMinutes(60), '0 * * * *');
+  assert.equal(getCronExpressionForMinutes(180), '0 */3 * * *');
+  assert.equal(getCronExpressionForMinutes(360), '0 */6 * * *');
+
+  // Inicialização e consulta de status
+  schedulerService.init();
+  const status = schedulerService.getStatus();
+  assert.equal(status.isRunning, true);
+  assert.equal(status.autoScheduled, true);
+  assert.equal(typeof status.intervalMinutes, 'number');
+  assert.ok(status.cronExpression);
+
+  // Parada limpa
+  schedulerService.stop();
+  assert.equal(schedulerService.getStatus().isRunning, false);
 });

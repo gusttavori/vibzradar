@@ -14,8 +14,6 @@ export interface TelegramDispatchResult {
 }
 
 export class NotificationService {
-  private sentOpportunities: Set<string> = new Set();
-
   /**
    * Formata a mensagem de notificação de acordo com o padrão editorial do Radar Vibz
    */
@@ -65,8 +63,9 @@ ${opp.originalUrl}`;
       return { success: false, message: 'Notificações do Telegram estão desabilitadas nas Configurações.' };
     }
 
-    if (this.sentOpportunities.has(opp.id)) {
-      return { success: false, message: 'Notificação já enviada anteriormente para esta oportunidade (deduplicada).' };
+    // Deduplicação persistente via banco JSON
+    if (db.isOpportunityNotified(opp.id)) {
+      return { success: false, message: 'Notificação já enviada anteriormente para esta oportunidade (deduplicada no banco JSON).' };
     }
 
     // Check minimum relevance
@@ -78,7 +77,7 @@ ${opp.originalUrl}`;
     const result = await this.sendTelegramRaw(settings.telegram.botToken, settings.telegram.chatId, text);
 
     if (result.success) {
-      this.sentOpportunities.add(opp.id);
+      db.markOpportunityNotified(opp.id);
       db.logSystem('TELEGRAM', 'SUCCESS', `Notificação enviada com sucesso para o evento "${opp.eventName}" (@${opp.username}).`);
     } else {
       db.logSystem('TELEGRAM', 'WARN', `Falha no envio Telegram para "${opp.eventName}": ${result.message}`);

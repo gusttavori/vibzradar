@@ -122,6 +122,8 @@ export interface Opportunity {
   internalNotes: string;
   contactLogs: ContactLog[];
   isDemo?: boolean;
+  notified?: boolean;
+  notifiedAt?: string;
 }
 
 export type CandidateStatus = 'Pendente' | 'Aprovado' | 'Rejeitado' | 'Já cadastrado';

@@ -10,6 +10,7 @@ import { aiAnalysisService } from './services/publicationAnalysisService';
 import { notificationService } from './services/notificationService';
 import { discoveryService } from './services/discoveryService';
 import { MetaInstagramProvider } from './services/instagramProvider';
+import { schedulerService } from './services/schedulerService';
 import { ProfileCategory } from '../types/radar';
 
 export const apiRouter = Router();
@@ -211,9 +212,11 @@ apiRouter.get('/monitoring/status', (_req: Request, res: Response) => {
     success: true,
     data: {
       isBusy: monitoringEngine.isBusy(),
+      isLocked: monitoringEngine.isLocked(),
       settings: settings.monitoring,
       providerMode: settings.instagram.providerMode,
-      lastExecution: lastLog || null
+      lastExecution: lastLog || null,
+      scheduler: schedulerService.getStatus()
     }
   });
 });
@@ -485,6 +488,8 @@ apiRouter.put('/settings', (req: Request, res: Response) => {
     }
 
     const saved = db.updateSettings(updates);
+    // Recria ou atualiza o agendador automaticamente com as novas configurações
+    schedulerService.reload();
     res.json({ success: true, data: saved });
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Falha ao salvar configurações' });
@@ -522,11 +527,13 @@ apiRouter.post('/settings/test-gemini', async (req: Request, res: Response) => {
 
 apiRouter.post('/settings/reset-demo', (_req: Request, res: Response) => {
   db.resetToDemoData();
+  schedulerService.reload();
   res.json({ success: true, message: 'Dados demonstrativos restaurados com sucesso!' });
 });
 
 apiRouter.post('/settings/clear-demo', (_req: Request, res: Response) => {
   db.clearDemoData();
+  schedulerService.reload();
   res.json({ success: true, message: 'Dados demonstrativos removidos.' });
 });
 

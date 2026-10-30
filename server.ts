@@ -9,6 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { apiRouter } from './src/server/api';
+import { schedulerService } from './src/server/services/schedulerService';
 
 dotenv.config();
 
@@ -45,9 +46,22 @@ async function startServer() {
     });
   }
 
-  app.listen(port, '0.0.0.0', () => {
+  const server = app.listen(port, '0.0.0.0', () => {
     console.log(`[Radar Vibz] Server running on http://0.0.0.0:${port}`);
+    // Inicializa o serviço de agendamento automático junto com o servidor Express
+    schedulerService.init();
   });
+
+  const shutdown = () => {
+    console.log('[Radar Vibz] Shutting down scheduler and server...');
+    schedulerService.stop();
+    server.close(() => {
+      process.exit(0);
+    });
+  };
+
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
 startServer().catch(err => {

@@ -33,6 +33,7 @@ interface DatabaseSchema {
   candidates: ProfileCandidate[];
   monitoringLogs: MonitoringCycleLog[];
   systemLogs: SystemLog[];
+  notifiedOpportunityIds?: string[];
 }
 
 class RadarDatabase {
@@ -58,6 +59,9 @@ class RadarDatabase {
         const raw = fs.readFileSync(this.dbFilePath, 'utf-8');
         const parsed = JSON.parse(raw);
         if (parsed && Array.isArray(parsed.profiles)) {
+          if (!Array.isArray(parsed.notifiedOpportunityIds)) {
+            parsed.notifiedOpportunityIds = [];
+          }
           return parsed;
         }
       } catch (err) {
@@ -72,7 +76,8 @@ class RadarDatabase {
       opportunities: JSON.parse(JSON.stringify(INITIAL_OPPORTUNITIES)),
       candidates: JSON.parse(JSON.stringify(INITIAL_CANDIDATES)),
       monitoringLogs: JSON.parse(JSON.stringify(INITIAL_MONITORING_LOGS)),
-      systemLogs: JSON.parse(JSON.stringify(INITIAL_SYSTEM_LOGS))
+      systemLogs: JSON.parse(JSON.stringify(INITIAL_SYSTEM_LOGS)),
+      notifiedOpportunityIds: []
     };
 
     this.saveData(initialData);
@@ -368,6 +373,33 @@ class RadarDatabase {
     return newLog;
   }
 
+  // Notificações & Deduplicação Persistente
+  public isOpportunityNotified(opportunityId: string): boolean {
+    const opp = this.getOpportunityById(opportunityId);
+    const inList = Array.isArray(this.data.notifiedOpportunityIds) && this.data.notifiedOpportunityIds.includes(opportunityId);
+    return !!(opp?.notified || inList);
+  }
+
+  public markOpportunityNotified(opportunityId: string): boolean {
+    if (!Array.isArray(this.data.notifiedOpportunityIds)) {
+      this.data.notifiedOpportunityIds = [];
+    }
+    if (!this.data.notifiedOpportunityIds.includes(opportunityId)) {
+      this.data.notifiedOpportunityIds.push(opportunityId);
+    }
+    const opp = this.getOpportunityById(opportunityId);
+    if (opp) {
+      opp.notified = true;
+      opp.notifiedAt = new Date().toISOString();
+    }
+    this.saveData();
+    return true;
+  }
+
+  public getNotifiedOpportunityIds(): string[] {
+    return [...(this.data.notifiedOpportunityIds || [])];
+  }
+
   // Profile Candidates (Discovery)
   public getCandidates(status?: string): ProfileCandidate[] {
     let list = [...this.data.candidates];
@@ -557,7 +589,8 @@ class RadarDatabase {
       opportunities: JSON.parse(JSON.stringify(INITIAL_OPPORTUNITIES)),
       candidates: JSON.parse(JSON.stringify(INITIAL_CANDIDATES)),
       monitoringLogs: JSON.parse(JSON.stringify(INITIAL_MONITORING_LOGS)),
-      systemLogs: JSON.parse(JSON.stringify(INITIAL_SYSTEM_LOGS))
+      systemLogs: JSON.parse(JSON.stringify(INITIAL_SYSTEM_LOGS)),
+      notifiedOpportunityIds: []
     };
     this.saveData();
     return true;
