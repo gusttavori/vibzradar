@@ -5,6 +5,7 @@
 
 import { GoogleGenAI, Type } from '@google/genai';
 import { AIAnalysisResult } from '../../types/radar';
+import { db } from '../database';
 
 export class PublicationAnalysisService {
   private ai: GoogleGenAI | null = null;
@@ -28,9 +29,6 @@ export class PublicationAnalysisService {
     }
   }
 
-  /**
-   * Analisa a legenda e metadados de uma publicação usando Gemini 3.8 Flash
-   */
   async analyzePublication(params: {
     caption: string;
     username: string;
@@ -38,12 +36,13 @@ export class PublicationAnalysisService {
     city?: string;
     publishedAt: string;
   }): Promise<AIAnalysisResult> {
-    const cacheKey = `${params.username}:${params.caption.trim()}`;
+    const safeCaption = (params.caption || '').trim();
+    const cacheKey = `${params.username}:${safeCaption}`;
     if (this.cache.has(cacheKey)) {
       return this.cache.get(cacheKey)!;
     }
 
-    if (!params.caption || params.caption.trim().length < 5) {
+    if (!safeCaption || safeCaption.length < 5) {
       const emptyResult: AIAnalysisResult = {
         is_event: false,
         is_opportunity: false,
@@ -67,21 +66,22 @@ export class PublicationAnalysisService {
       return emptyResult;
     }
 
-    // Try Gemini API if client available
-    if (this.ai) {
+    const settings = await db.getSettings();
+
+    if (this.ai && settings.gemini.enabled) {
       try {
         const prompt = `Analise a seguinte publicação de entretenimento do Instagram para o Radar Vibz (ferramenta de inteligência comercial do Vibz Eventos no Sudoeste da Bahia).
-Identifique se anuncia um evento real, show, festa, festival ou programação de bar, e avalie a oportunidade comercial para o Vibz (venda de ingressos, divulgação de programação, parcerias com produtores).
+Identifique se anuncia um evento real, show, festa, festival ou programação relevante, e avalie a oportunidade comercial para o Vibz (venda de ingressos, divulgação de programação, parcerias com produtores).
 
-REGRAS ESTRITAS:
-1. NUNCA assuma que a data de publicação é a data do evento. Extraia a data em que o evento realmente ocorrerá. Se a legenda diz "Sexta 30/10" ou "21 de Novembro", extraia a data futura correspondente. Se não houver data explícita, retorne null.
-2. NUNCA invente atrações, artistas, locais ou horários que não estejam no texto.
-3. Se for agradecimento pós-evento ("Que noite linda", "Obrigado a quem foi"), NÃO é evento futuro (is_event: false, is_opportunity: false, category: "Retrospectiva").
-4. Se for aviso de reformas, horário comercial ou celebração cívica, classifique como "Conteúdo institucional" ou "Outros".
+REGRAS DE FILTRAGEM RIGOROSAS (IMPORTANTE):
+1. IGNORE completamente publicações de rotina diária, cardápios de restaurantes, pratos do dia, promoções comerciais comuns (ex: "almoço executivo", "desconto"), mensagens motivacionais ou posts genéricos de marketing institucional do estabelecimento.
+2. NUNCA assuma que a data de publicação é a data do evento. Extraia a data em que o evento realmente ocorrerá. Se a legenda diz "Sexta 30/10" ou "21 de Novembro", extraia a data futura correspondente. Se não houver data explícita, retorne null.
+3. NUNCA invente atrações, artistas, locais ou horários que não estejam no texto.
+4. Se for agradecimento pós-evento ("Que noite linda", "Obrigado a quem foi"), NÃO é evento futuro (is_event: false, is_opportunity: false, category: "Retrospectiva").
 5. Relevância:
-   - "high": festival, show confirmado com data definida, festa com venda de ingressos ou anúncio de lotes.
-   - "medium": programação semanal de bar, música ao vivo, anúncio prévio com informações incompletas.
-   - "low": posts comuns, memes, retrospectivas, institucional.
+   - "high": festival, show confirmado com data definida, festa com venda de ingressos ou anúncio de lotes, eventos públicos de grande porte.
+   - "medium": programação semanal de bar, música ao vivo, anúncio prévio com informações relevantes.
+   - "low": posts comuns, marketing comum de estabelecimento, cardápios, memes, retrospectivas.
 
 DADOS DA PUBLICAÇÃO:
 - Perfil: @${params.username}
@@ -90,15 +90,14 @@ DADOS DA PUBLICAÇÃO:
 - Data de postagem: ${params.publishedAt}
 - Legenda original:
 """
-${params.caption}
+${safeCaption}
 """`;
 
         const response = await this.ai.models.generateContent({
-          model: 'gemini-3.8-flash',
+          model: 'gemini-3.8-flash', 
           contents: prompt,
           config: {
-            systemInstruction:
-              'Você é o motor de inteligência artificial do Radar Vibz. Sua missão é extrair dados comerciais precisos de publicações no Instagram para a equipe comercial do Vibz Eventos.',
+            systemInstruction: 'Você é o motor de inteligência artificial do Radar Vibz...',
             responseMimeType: 'application/json',
             responseSchema: {
               type: Type.OBJECT,
@@ -145,7 +144,6 @@ ${params.caption}
         const textOutput = response.text;
         if (textOutput) {
           const parsed = JSON.parse(textOutput) as AIAnalysisResult;
-          // Normalize relevance
           const rel = (parsed.relevance || '').toLowerCase();
           parsed.relevance = rel === 'high' ? 'high' : rel === 'medium' ? 'medium' : 'low';
           this.cache.set(cacheKey, parsed);
@@ -156,16 +154,11 @@ ${params.caption}
       }
     }
 
-    // Heuristic Fallback Analysis Engine
-    const fallback = this.heuristicAnalysis(params);
+    const fallback = this.heuristicAnalysis({ ...params, caption: safeCaption });
     this.cache.set(cacheKey, fallback);
     return fallback;
   }
 
-  /**
-   * Mecanismo heurístico determinístico e robusto
-   * Atua como fallback quando a API externa não estiver disponível
-   */
   public heuristicAnalysis(params: {
     caption: string;
     username: string;
@@ -175,7 +168,6 @@ ${params.caption}
   }): AIAnalysisResult {
     const text = params.caption.toLowerCase();
 
-    // Check for post-event / retrospective
     const isRetrospective =
       text.includes('obrigado a todos') ||
       text.includes('que energia linda foi') ||
@@ -183,13 +175,16 @@ ${params.caption}
       text.includes('clipe novo no ar') ||
       text.includes('tbt') ||
       text.includes('manutenção preventiva') ||
+      text.includes('almoço executivo') ||
+      text.includes('cardápio') ||
+      text.includes('prato do dia') ||
       text.includes('expediente');
 
     if (isRetrospective) {
       return {
         is_event: false,
         is_opportunity: false,
-        category: text.includes('manutenção') ? 'Conteúdo institucional' : 'Retrospectiva',
+        category: text.includes('manutenção') ? 'Conteúdo institucional' : 'Retrospectiva / Marketing rotineiro',
         relevance: 'low',
         event_name: null,
         event_date: null,
@@ -199,7 +194,7 @@ ${params.caption}
         state: 'BA',
         artists: [],
         organizer: params.username,
-        summary: 'Publicação de registro pós-evento ou comunicado interno sem chamada de venda futura.',
+        summary: 'Publicação de registro pós-evento, cardápio ou comunicado interno sem chamada de evento futuro.',
         commercial_opportunity: 'Nenhuma oportunidade imediata identificada.',
         suggested_action: 'Manter em histórico sem contato comercial.',
         confidence: 0.94,
@@ -207,12 +202,10 @@ ${params.caption}
       };
     }
 
-    // Check for festival / big show
     const isFestival = text.includes('festival') || text.includes('summer fest') || text.includes('micareta');
     const isParty = text.includes('festa') || text.includes('calourada') || text.includes('save the date') || text.includes('baile');
-    const isBarLive = text.includes('acústico') || text.includes('música ao vivo') || text.includes('voz e violão') || text.includes('sextou') || text.includes('chopp');
+    const isBarLive = text.includes('acústico') || text.includes('música ao vivo') || text.includes('voz e violão') || text.includes('sextou');
 
-    // Date extraction heuristic
     let eventDate: string | null = null;
     const dateRegex = /(\d{1,2})[\/\s]+(?:de\s+)?(janeiro|fevereiro|março|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro|\d{1,2})/i;
     const match = text.match(dateRegex);
@@ -229,14 +222,12 @@ ${params.caption}
       eventDate = `${currentYear}-${month}-${day}`;
     }
 
-    // Time extraction heuristic
     let eventTime: string | null = null;
     const timeMatch = text.match(/(\d{1,2})h(?:\d{2})?|às (\d{1,2}:\d{2})/);
     if (timeMatch) {
       eventTime = timeMatch[1] ? `${timeMatch[1].padStart(2, '0')}:00` : timeMatch[2];
     }
 
-    // Extract Event Name
     let eventName: string | null = null;
     const firstLine = params.caption.split('\n')[0].replace(/[!🎉☀️💥🚀🌟]/g, '').trim();
     if (firstLine.length > 5 && firstLine.length < 60) {

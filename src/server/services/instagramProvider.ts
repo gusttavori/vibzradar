@@ -1,6 +1,6 @@
 /**
  * Radar Vibz - Instagram Provider Interface & Implementations
- * Meta Graph API (Oficial) & Demo Simulation Provider
+ * Roteamento Híbrido: Meta Graph API (Própria Conta) + Apify (Terceiros)
  */
 
 import { Profile, Publication, IntegrationMethod } from '../../types/radar';
@@ -31,46 +31,65 @@ export interface InstagramProvider {
   }>;
 }
 
-/**
- * Provedor Oficial Meta Graph API com Business Discovery
- * Não realiza scraping nem bypass de credenciais.
- */
 export class MetaInstagramProvider implements InstagramProvider {
   public name: IntegrationMethod = 'meta_graph_api';
+
+  private resolveToken(configToken?: string): string {
+    const envToken = (process.env.META_ACCESS_TOKEN || '').trim();
+    const cleanConfigToken = (configToken || '').trim();
+
+    if (envToken && !/[•●*]/.test(envToken) && envToken.length > 20) {
+      return envToken;
+    }
+
+    if (cleanConfigToken && !/[•●*]/.test(cleanConfigToken) && cleanConfigToken.length > 20) {
+      return cleanConfigToken;
+    }
+
+    return '';
+  }
 
   async testConnection(config: { accessToken: string; pageId: string; apiVersion: string }): Promise<{
     success: boolean;
     message: string;
     accountDetails?: Record<string, unknown>;
   }> {
-    if (!config.accessToken || !config.pageId) {
+    const token = this.resolveToken(config.accessToken);
+    const pageId = (config.pageId && !/[•●*]/.test(config.pageId) && config.pageId.trim().length > 0)
+      ? config.pageId.trim()
+      : (process.env.META_PAGE_ID || '').trim();
+
+    const apiVersion = config.apiVersion || 'v21.0';
+
+    if (!token || !pageId) {
       return {
         success: false,
-        message: 'Credenciais ausentes. Forneça o Access Token e o Page ID da conta Business no Meta for Developers.'
+        message: 'Credenciais ausentes. Forneça o Access Token e o Page ID no .env ou nas Configurações.'
       };
     }
 
     try {
-      const url = `https://graph.facebook.com/${config.apiVersion || 'v21.0'}/${config.pageId}?fields=name,username,instagram_business_account&access_token=${config.accessToken}`;
+      const url = `https://graph.facebook.com/${apiVersion}/${pageId}?fields=id,name,username&access_token=${encodeURIComponent(token)}`;
       const res = await fetch(url, { headers: { 'User-Agent': 'RadarVibz-Client/1.0' } });
       const data = await res.json();
 
       if (!res.ok || data.error) {
         return {
           success: false,
-          message: data.error?.message || 'Falha ao autenticar na Meta Graph API.'
+          message: data.error?.message ? `Meta API (${data.error.code}): ${data.error.message}` : 'Falha ao autenticar na Meta Graph API.'
         };
       }
 
+      const accountLabel = data.username ? `@${data.username}` : (data.name || data.id);
       return {
         success: true,
-        message: `Conexão bem-sucedida! Página: ${data.name || data.id}`,
+        message: `Conexão bem-sucedida! Conta Conectada: ${accountLabel}`,
         accountDetails: data
       };
     } catch (err: unknown) {
       return {
         success: false,
-        message: err instanceof Error ? err.message : 'Erro de rede ao conectar com a Meta Graph API.'
+        message: err instanceof Error ? err.message : 'Erro de rede ao conectar.'
       };
     }
   }
@@ -83,40 +102,102 @@ export class MetaInstagramProvider implements InstagramProvider {
     posts: Omit<Publication, 'id' | 'detectedAt'>[];
     error?: string;
   }> {
-    if (!config.accessToken || !config.pageId) {
+    const token = this.resolveToken(config.accessToken);
+    const pageId = (config.pageId && !/[•●*]/.test(config.pageId) && config.pageId.trim().length > 0)
+      ? config.pageId.trim()
+      : (process.env.META_PAGE_ID || '').trim();
+
+    const apiVersion = config.apiVersion || 'v21.0';
+    const cleanUsername = profile.username.replace(/^@/, '').trim();
+
+    if (!token || !pageId) {
       return {
         success: false,
         posts: [],
-        error: 'Meta Graph API não configurada. Configure o Access Token nas Configurações.'
+        error: 'Meta Access Token ou Page ID não encontrados no .env.'
       };
     }
 
     try {
-      const cleanUsername = profile.username.replace(/^@/, '').trim();
-      // Endpoint oficial Business Discovery
-      const fields = `business_discovery.username(${cleanUsername}){name,username,followers_count,media.limit(10){id,caption,media_type,media_url,permalink,timestamp}}`;
-      const url = `https://graph.facebook.com/${config.apiVersion || 'v21.0'}/${config.pageId}?fields=${encodeURIComponent(fields)}&access_token=${config.accessToken}`;
+      // 1. Identifica se é a própria conta
+      let authenticatedUsername = '';
+      try {
+        const meRes = await fetch(`https://graph.facebook.com/${apiVersion}/${pageId}?fields=username&access_token=${encodeURIComponent(token)}`);
+        const meData = await meRes.json();
+        authenticatedUsername = (meData.username || '').toLowerCase();
+      } catch (_) {}
 
-      const res = await fetch(url, { headers: { 'User-Agent': 'RadarVibz-Client/1.0' } });
-      const data = await res.json();
+      const isOwnAccount = authenticatedUsername && (cleanUsername.toLowerCase() === authenticatedUsername || cleanUsername.toLowerCase() === 'vibzeventos');
+      let mediaList: InstagramMediaItem[] = [];
 
-      if (!res.ok || data.error) {
-        return {
-          success: false,
-          posts: [],
-          error: data.error?.message || 'Erro na consulta do perfil via Business Discovery.'
+      if (isOwnAccount) {
+        // ROTA A: Leitura direta da própria conta (Meta Graph API Oficial)
+        const ownUrl = `https://graph.facebook.com/${apiVersion}/${pageId}/media?fields=id,caption,media_type,media_url,permalink,timestamp&limit=25&access_token=${encodeURIComponent(token)}`;
+        const res = await fetch(ownUrl);
+        const data = await res.json();
+
+        if (!res.ok || data.error) {
+          console.error(`❌ [Meta API - Própria Conta @${cleanUsername}]:`, data.error);
+          return { success: false, posts: [], error: data.error?.message };
+        }
+        mediaList = data.data || [];
+        console.log(`✅ [Meta API - Própria Conta] @${cleanUsername}: ${mediaList.length} mídias obtidas via /{ig_user}/media.`);
+      } else {
+        // ROTA B: Leitura de contas de terceiros via Apify Instagram Post Scraper
+        const apifyToken = process.env.APIFY_TOKEN || '';
+        
+        if (!apifyToken) {
+          console.error(`❌ [Apify] Token ausente para buscar terceiros (@${cleanUsername}). Adicione APIFY_TOKEN no .env.`);
+          return { success: false, posts: [], error: 'APIFY_TOKEN não configurada no .env para buscar perfis de terceiros.' };
+        }
+
+        // Endpoint síncrono da Apify para extrair posts por username
+        const runUrl = `https://api.apify.com/v2/acts/apify~instagram-post-scraper/run-sync-get-dataset-items?token=${apifyToken}`;
+        
+        const payload = {
+          username: [cleanUsername],
+          resultsLimit: 15
         };
+
+        const res = await fetch(runUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (!res.ok) {
+          const errText = await res.text();
+          console.error(`❌ [Apify Error - @${cleanUsername}]:`, errText);
+          return { success: false, posts: [], error: `Erro Apify HTTP ${res.status}` };
+        }
+
+        const items = await res.json();
+        
+        if (!Array.isArray(items)) {
+          return { success: false, posts: [], error: 'Formato de resposta inválido da Apify.' };
+        }
+
+        mediaList = items.map((item: any) => ({
+          id: item.id || item.shortCode || `apify_${Date.now()}_${Math.random()}`,
+          caption: item.caption || '',
+          media_type: item.type === 'Video' ? 'VIDEO' : item.type === 'Sidecar' ? 'CAROUSEL_ALBUM' : 'IMAGE',
+          media_url: item.displayUrl || item.videoUrl || '',
+          permalink: item.url || `https://instagram.com/p/${item.shortCode}/`,
+          timestamp: item.timestamp || new Date().toISOString()
+        }));
+
+        console.log(`✅ [Apify - Terceiros] @${cleanUsername}: ${mediaList.length} mídias obtidas com sucesso.`);
       }
 
-      const mediaList: InstagramMediaItem[] = data.business_discovery?.media?.data || [];
+      // Mapeamento final para o banco PostgreSQL
       const posts: Omit<Publication, 'id' | 'detectedAt'>[] = mediaList.map(item => ({
         profileId: profile.id,
         username: profile.username,
         externalId: item.id,
-        originalUrl: item.permalink || `https://instagram.com/p/${item.id}`,
+        originalUrl: item.permalink,
         mediaType: item.media_type === 'CAROUSEL_ALBUM' ? 'CAROUSEL_ALBUM' : item.media_type === 'VIDEO' ? 'VIDEO' : 'IMAGE',
         caption: item.caption || '',
-        publishedAt: item.timestamp || new Date().toISOString(),
+        publishedAt: item.timestamp,
         mediaUrl: item.media_url,
         thumbnailUrl: item.media_url,
         analysisStatus: 'pending',
@@ -127,19 +208,16 @@ export class MetaInstagramProvider implements InstagramProvider {
 
       return { success: true, posts };
     } catch (err: unknown) {
+      console.error(`❌ [Exception em @${cleanUsername}]:`, err);
       return {
         success: false,
         posts: [],
-        error: err instanceof Error ? err.message : 'Falha na requisição à Meta API.'
+        error: err instanceof Error ? err.message : 'Falha na requisição.'
       };
     }
   }
 }
 
-/**
- * Provedor de Demonstração e Simulação
- * Permite demonstrar o ciclo de monitoramento sem requisições reais ou quando as credenciais ainda não foram fornecidas.
- */
 export class DemoSimulationProvider implements InstagramProvider {
   public name: IntegrationMethod = 'demo_simulation';
 
@@ -155,12 +233,10 @@ export class DemoSimulationProvider implements InstagramProvider {
     posts: Omit<Publication, 'id' | 'detectedAt'>[];
     error?: string;
   }> {
-    // Generate 1-2 realistic mock candidate posts tailored to profile category
     const now = new Date();
     const cleanUser = profile.username.replace(/^@/, '');
     const posts: Omit<Publication, 'id' | 'detectedAt'>[] = [];
 
-    // Fictional realistic templates
     const templates: Record<string, { caption: string; type: 'IMAGE' | 'VIDEO' | 'CAROUSEL_ALBUM' }[]> = {
       'Casa de eventos': [
         {
@@ -170,25 +246,7 @@ export class DemoSimulationProvider implements InstagramProvider {
       ],
       'Bar': [
         {
-          caption: `QUINTA ACÚSTICA no ${profile.displayName}! Nesta quinta 05 de Novembro tem voz e violão a partir das 19h30. Chopp em dobro até as 21h. Venha curtir a noite em ${profile.city}! Reservas pelo direct.`,
-          type: 'IMAGE'
-        }
-      ],
-      'Produtora': [
-        {
-          caption: `NOVA DATA CONFIRMADA! 🚀 A maior micareta indoor do Sudoeste Baiano desembarca em ${profile.city} no dia 16 de Janeiro de 2027. Primeiro lote de ingressos será liberado na próxima semana. Fique ligado!`,
-          type: 'CAROUSEL_ALBUM'
-        }
-      ],
-      'Artista': [
-        {
-          caption: `Passando para agradecer o carinho de todos em ${profile.city}! Próxima parada neste sábado com show ao vivo no Lounge Imperial. Quem vem cantar comigo?`,
-          type: 'VIDEO'
-        }
-      ],
-      'Banda': [
-        {
-          caption: `Arrasta-pé garantido neste fim de semana! Sábado estamos em ${profile.city} fazendo aquele piseiro diferenciado. Início às 22h. Não percam!`,
+          caption: `QUINTA ACÚSTICA no ${profile.displayName}! Nesta quinta tem voz e violão a partir das 19h30. Reservas pelo direct.`,
           type: 'IMAGE'
         }
       ]
@@ -196,8 +254,7 @@ export class DemoSimulationProvider implements InstagramProvider {
 
     const chosenList = templates[profile.category] || templates['Bar'];
     const chosen = chosenList[Math.floor(Math.random() * chosenList.length)];
-
-    const simId = `sim_${cleanUser}_${now.getFullYear()}${(now.getMonth() + 1).toString().padStart(2, '0')}${now.getDate().toString().padStart(2, '0')}_${now.getHours()}`;
+    const simId = `sim_${cleanUser}_${Date.now()}`;
 
     posts.push({
       profileId: profile.id,

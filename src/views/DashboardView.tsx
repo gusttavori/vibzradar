@@ -47,20 +47,44 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     );
   }
 
-  const { kpis, monitoringStatus, oppsByCategory, oppsByCity, mostActive, recentPublications, priorityOpportunities } = stats;
+  // Handle both flat structure (new) and nested structure (old) safely
+  const flatStats = {
+    totalProfiles: stats.totalProfiles || stats.kpis?.totalProfiles || 0,
+    activeProfiles: stats.activeMonitoring || stats.kpis?.activeProfiles || 0,
+    failedProfiles: stats.kpis?.failedProfiles || 0,
+    totalPublications: stats.kpis?.totalPublications || 0,
+    analyzedPublications: stats.kpis?.analyzedPublications || 0,
+    totalOpportunities: stats.totalOpportunities || stats.kpis?.totalOpportunities || 0,
+    highRelevanceOpportunities: stats.kpis?.highRelevanceOpportunities || 0,
+    pendingCandidates: stats.kpis?.pendingCandidates || 0,
+  };
+
+  const monitoringStatus = stats.monitoringStatus || {
+    lastExecution: null,
+    nextExecution: null,
+    lastProfilesChecked: 0,
+    lastNewPostsFound: 0,
+    lastErrorsCount: 0
+  };
+
+  const oppsByCategory = stats.oppsByCategory || {};
+  const oppsByCity = stats.oppsByCity || {};
+  const mostActive = stats.mostActive || [];
+  const recentPublications = stats.recentPublications || [];
+  const priorityOpportunities = stats.priorityOpportunities || [];
 
   const kpiCards = [
-    { label: 'Perfis Cadastrados', value: kpis.totalProfiles, icon: Users, color: 'text-indigo-400', tab: 'profiles' as NavTab },
-    { label: 'Perfis Ativos', value: kpis.activeProfiles, icon: Activity, color: 'text-emerald-400', tab: 'profiles' as NavTab },
-    { label: 'Com Falha de Acesso', value: kpis.failedProfiles, icon: AlertTriangle, color: 'text-red-400', tab: 'profiles' as NavTab },
-    { label: 'Publicações Mapeadas', value: kpis.totalPublications, icon: FileImage, color: 'text-blue-400', tab: 'posts' as NavTab },
-    { label: 'Analisadas por IA', value: kpis.analyzedPublications, icon: Sparkles, color: 'text-purple-400', tab: 'posts' as NavTab },
-    { label: 'Oportunidades Vibz', value: kpis.totalOpportunities, icon: TrendingUp, color: 'text-violet-400', tab: 'opportunities' as NavTab },
-    { label: 'Alta Relevância', value: kpis.highRelevanceOpportunities, icon: Flame, color: 'text-rose-400', tab: 'opportunities' as NavTab },
-    { label: 'Candidatos Descoberta', value: kpis.pendingCandidates, icon: UserPlus, color: 'text-amber-400', tab: 'discovery' as NavTab }
+    { label: 'Perfis Cadastrados', value: flatStats.totalProfiles, icon: Users, color: 'text-indigo-400', tab: 'profiles' as NavTab },
+    { label: 'Perfis Ativos', value: flatStats.activeProfiles, icon: Activity, color: 'text-emerald-400', tab: 'profiles' as NavTab },
+    { label: 'Com Falha de Acesso', value: flatStats.failedProfiles, icon: AlertTriangle, color: 'text-red-400', tab: 'profiles' as NavTab },
+    { label: 'Publicações Mapeadas', value: flatStats.totalPublications, icon: FileImage, color: 'text-blue-400', tab: 'posts' as NavTab },
+    { label: 'Analisadas por IA', value: flatStats.analyzedPublications, icon: Sparkles, color: 'text-purple-400', tab: 'posts' as NavTab },
+    { label: 'Oportunidades Vibz', value: flatStats.totalOpportunities, icon: TrendingUp, color: 'text-violet-400', tab: 'opportunities' as NavTab },
+    { label: 'Alta Relevância', value: flatStats.highRelevanceOpportunities, icon: Flame, color: 'text-rose-400', tab: 'opportunities' as NavTab },
+    { label: 'Candidatos Descoberta', value: flatStats.pendingCandidates, icon: UserPlus, color: 'text-amber-400', tab: 'discovery' as NavTab }
   ];
 
-  const totalOpps = Math.max(1, Object.values(oppsByCategory).reduce((a, b) => a + b, 0));
+  const totalOpps = Math.max(1, Object.values(oppsByCategory).reduce((a, b) => (a as number) + (b as number), 0) as number);
 
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto">
@@ -145,7 +169,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               onClick={() => onNavigate('opportunities')}
               className="text-xs text-[#9D54FF] hover:underline font-semibold flex items-center gap-1"
             >
-              <span>Ver todas ({kpis.totalOpportunities})</span>
+              <span>Ver todas ({flatStats.totalOpportunities})</span>
               <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
@@ -156,7 +180,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 Nenhuma oportunidade prioritária pendente no momento.
               </div>
             ) : (
-              priorityOpportunities.map(opp => (
+              priorityOpportunities.map((opp: Opportunity) => (
                 <div
                   key={opp.id}
                   onClick={() => onSelectOpportunity(opp)}
@@ -217,7 +241,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 Nenhuma publicação mapeada no momento.
               </div>
             ) : (
-              recentPublications.map(pub => (
+              recentPublications.map((pub: Publication) => (
                 <div
                   key={pub.id}
                   onClick={() => onSelectPost(pub)}
@@ -254,12 +278,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <h3 className="text-xs font-bold text-white mb-3">Oportunidades por Categoria</h3>
           <div className="space-y-2.5">
             {Object.entries(oppsByCategory).map(([cat, count]) => {
-              const pct = Math.round((count / totalOpps) * 100);
+              const countNum = count as number;
+              const pct = Math.round((countNum / totalOpps) * 100);
               return (
                 <div key={cat} className="space-y-1">
                   <div className="flex justify-between text-xs">
                     <span className="text-gray-300 font-medium">{cat}</span>
-                    <span className="text-gray-400 font-semibold">{count} ({pct}%)</span>
+                    <span className="text-gray-400 font-semibold">{countNum} ({pct}%)</span>
                   </div>
                   <div className="w-full bg-[#1F1F2C] h-1.5 rounded-full overflow-hidden">
                     <div className="bg-[#4C01B5] h-full rounded-full" style={{ width: `${pct}%` }} />
@@ -275,12 +300,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <h3 className="text-xs font-bold text-white mb-3">Oportunidades por Cidade</h3>
           <div className="space-y-2.5">
             {Object.entries(oppsByCity).map(([city, count]) => {
-              const pct = Math.round((count / totalOpps) * 100);
+              const countNum = count as number;
+              const pct = Math.round((countNum / totalOpps) * 100);
               return (
                 <div key={city} className="space-y-1">
                   <div className="flex justify-between text-xs">
                     <span className="text-gray-300 font-medium">{city}</span>
-                    <span className="text-gray-400 font-semibold">{count}</span>
+                    <span className="text-gray-400 font-semibold">{countNum}</span>
                   </div>
                   <div className="w-full bg-[#1F1F2C] h-1.5 rounded-full overflow-hidden">
                     <div className="bg-[#9D54FF] h-full rounded-full" style={{ width: `${pct}%` }} />
@@ -295,8 +321,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         <div className="bg-[#14141D] border border-[#222230] rounded-xl p-5">
           <h3 className="text-xs font-bold text-white mb-3">Perfis Mais Ativos</h3>
           <div className="space-y-3">
-            {mostActive.map((prof, i) => (
-              <div key={prof.id} className="flex items-center justify-between text-xs py-1">
+            {mostActive.map((prof: any, i) => (
+              <div key={prof.id || i} className="flex items-center justify-between text-xs py-1">
                 <div className="flex items-center gap-2 min-w-0">
                   <span className="text-[10px] text-gray-500 font-bold w-4">{i + 1}.</span>
                   <div className="min-w-0">

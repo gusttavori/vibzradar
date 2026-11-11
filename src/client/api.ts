@@ -299,8 +299,9 @@ export const api = {
     return json.data;
   },
 
+// --- CONFIGURAÇÕES ---
   async testInstagram(data?: { accessToken?: string; pageId?: string; apiVersion?: string }): Promise<{ success: boolean; message: string }> {
-    const res = await fetch('/api/settings/test-instagram', {
+    const res = await fetch('/api/settings/test-meta', { // <-- Redirecionado para /api/settings/test-meta
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data || {})

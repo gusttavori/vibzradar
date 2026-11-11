@@ -1,6 +1,6 @@
 /**
  * Radar Vibz - Discovery Service
- * Motor de busca e identificação de perfis candidatos no Sudoeste Baiano
+ * Motor de busca 100% automatizado e real via Apify
  */
 
 import { db } from '../database';
@@ -8,124 +8,75 @@ import { ProfileCandidate, ProfileCategory } from '../../types/radar';
 
 export class DiscoveryService {
   /**
-   * Executa uma varredura de novos candidatos com base em filtros de cidade e categoria
+   * Executa a varredura automática utilizando o Apify para buscar perfis reais no Instagram
    */
   async discoverCandidates(params: {
     city?: string;
     category?: ProfileCategory;
     keyword?: string;
   }): Promise<ProfileCandidate[]> {
-    const existingUsernames = new Set(db.getProfiles().map(p => p.username.toLowerCase()));
-
-    // Realistic database of regional prospects in Bahia
-    const candidatePool: Array<{
-      username: string;
-      displayName: string;
-      category: ProfileCategory;
-      city: string;
-      state: string;
-      justification: string;
-      source: string;
-      followers: number;
-    }> = [
-      {
-        username: 'sunset_lounge_conquista',
-        displayName: 'Sunset Lounge & Rooftop [Fictício]',
-        category: 'Bar',
-        city: 'Vitória da Conquista',
-        state: 'BA',
-        justification: 'Postagens frequentes com atrações de Pagode de Mesa e DJ aos domingos.',
-        source: 'Varredura por Palavra-chave (Rooftop Conquista)',
-        followers: 18400
-      },
-      {
-        username: 'arenashow_jequie',
-        displayName: 'Arena Show Hall Jequié [Fictício]',
-        category: 'Casa de eventos',
-        city: 'Jequié',
-        state: 'BA',
-        justification: 'Anúncio recente de festival de forró para o mês de dezembro.',
-        source: 'Mapeamento Regional (Jequié/Médio Rio de Contas)',
-        followers: 24900
-      },
-      {
-        username: 'bloco_pipoca_sudoeste',
-        displayName: 'Bloco Pipoca Conquista [Fictício]',
-        category: 'Organizador',
-        city: 'Vitória da Conquista',
-        state: 'BA',
-        justification: 'Comissão de micareta independente organizando abadás para 2027.',
-        source: 'Menções em Perfis Parceiros',
-        followers: 15300
-      },
-      {
-        username: 'cervejaria_serrana_vca',
-        displayName: 'Cervejaria Serrana Bier [Fictício]',
-        category: 'Bar',
-        city: 'Vitória da Conquista',
-        state: 'BA',
-        justification: 'Programação de Rock ao vivo toda sexta-feira e festival de chopes especiais.',
-        source: 'Busca por Categoria (Bares Musicais)',
-        followers: 12100
-      },
-      {
-        username: 'itapetinga_eventos_producoes',
-        displayName: 'Itapetinga Music & Produções [Fictício]',
-        category: 'Produtora',
-        city: 'Itapetinga',
-        state: 'BA',
-        justification: 'Produtora de vaquejadas e shows sertanejos no Parque Juvino Oliveira.',
-        source: 'Expansão Sudoeste (Itapetinga)',
-        followers: 21800
-      },
-      {
-        username: 'dj_carlos_mix',
-        displayName: 'DJ Carlos Mix Bahia [Fictício]',
-        category: 'Artista',
-        city: 'Vitória da Conquista',
-        state: 'BA',
-        justification: 'DJ residente em eventos universitários de medicina e engenharia da UESB.',
-        source: 'Rede de Contatos Vibz',
-        followers: 9700
-      }
-    ];
+    const profiles = await db.getProfiles();
+    const existingCandidates = await db.getCandidates();
+    const existingUsernames = new Set(profiles.map(p => p.username.toLowerCase()));
+    const settings = await db.getSettings();
 
     const added: ProfileCandidate[] = [];
+    const searchTerm = params.keyword || params.category || 'eventos e shows';
+    const targetCity = params.city || 'Vitória da Conquista';
 
-    for (const item of candidatePool) {
-      if (params.city && item.city.toLowerCase() !== params.city.toLowerCase()) continue;
-      if (params.category && item.category !== params.category) continue;
-      if (params.keyword && !item.displayName.toLowerCase().includes(params.keyword.toLowerCase()) && !item.justification.toLowerCase().includes(params.keyword.toLowerCase())) continue;
+    try {
+      const apifyToken = process.env.APIFY_API_TOKEN || settings.instagram?.accessToken;
 
-      // Check if already in candidates
-      const alreadyCand = db.getCandidates().some(c => c.username.toLowerCase() === item.username.toLowerCase());
-      if (alreadyCand) continue;
+      if (apifyToken) {
+        // Chamada real ao ator de busca do Apify para encontrar perfis no Instagram
+        const response = await fetch(`https://api.apify.com/v2/acts/apify~instagram-profile-scraper/run-sync-get-dataset-items?token=${apifyToken}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            search: `${searchTerm} ${targetCity}`,
+            searchType: 'user',
+            resultsLimit: 15
+          })
+        });
 
-      const isMonitored = existingUsernames.has(item.username.toLowerCase());
+        if (response.ok) {
+          const results = await response.json();
+          if (Array.isArray(results)) {
+            for (const item of results) {
+              const username = item.username || item.ownerUsername;
+              if (!username) continue;
 
-      const cand = db.addCandidate({
-        username: item.username,
-        displayName: item.displayName,
-        probableCategory: item.category,
-        city: item.city,
-        state: item.state,
-        justification: item.justification,
-        source: item.source,
-        followersEstimated: item.followers,
-        isDemo: true
-      });
+              const cleanUsername = username.toLowerCase();
+              if (existingUsernames.has(cleanUsername)) continue;
+              if (existingCandidates.some(c => c.username.toLowerCase() === cleanUsername)) continue;
 
-      if (isMonitored) {
-        cand.status = 'Já cadastrado';
+              const cand = await db.addCandidate({
+                username: cleanUsername,
+                displayName: item.fullName || item.name || cleanUsername,
+                probableCategory: params.category && params.category !== 'Todas as Categorias' ? params.category : 'Organizador',
+                city: targetCity,
+                state: 'BA',
+                justification: item.biography || `Encontrado via automação regional para ${searchTerm}.`,
+                source: 'Varredura Automática Apify',
+                followersEstimated: item.followersCount || 5000,
+                isDemo: false
+              });
+
+              if (cand) {
+                added.push(cand);
+              }
+            }
+          }
+        }
       }
-
-      added.push(cand);
+    } catch (err) {
+      console.warn('[Discovery Error] Falha na execução da busca automatizada via Apify:', err);
     }
 
-    db.logSystem(
+    await db.logSystem(
       'PROFILES',
       'INFO',
-      `Busca de descoberta finalizada. ${added.length} novos perfis candidatos identificados.`
+      `Varredura automática de descoberta finalizada. ${added.length} novos perfis reais adicionados à fila de pendentes.`
     );
 
     return added;

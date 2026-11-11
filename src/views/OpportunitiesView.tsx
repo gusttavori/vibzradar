@@ -246,8 +246,11 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
                           </span>
                         </div>
 
-                        <h4 className="text-xs font-bold text-white group-hover:text-[#B57CFF] transition-colors line-clamp-2">
-                          {opp.eventName}
+                        <h4 
+                          className="text-xs font-medium text-gray-200 group-hover:text-[#B57CFF] transition-colors line-clamp-3 leading-relaxed mt-1"
+                          title={(opp as any).publication?.caption || opp.eventName}
+                        >
+                          {(opp as any).publication?.caption || opp.eventName}
                         </h4>
 
                         <div className="text-[11px] text-gray-400 space-y-0.5">
@@ -294,12 +297,15 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
                   onClick={() => setActiveOpportunity(opp)}
                   className="hover:bg-[#181824] transition-colors cursor-pointer group"
                 >
-                  <td className="py-3.5 px-4">
-                    <span className="font-bold text-white group-hover:text-[#B57CFF] transition-colors block">
-                      {opp.eventName}
+                  <td className="py-3.5 px-4 max-w-md">
+                    <span 
+                      className="font-medium text-gray-200 group-hover:text-[#B57CFF] transition-colors block line-clamp-2 leading-relaxed"
+                      title={(opp as any).publication?.caption || opp.eventName}
+                    >
+                      {(opp as any).publication?.caption || opp.eventName}
                     </span>
-                    <span className="text-[11px] text-gray-400 line-clamp-1">
-                      {opp.commercialPotential || opp.summary}
+                    <span className="text-[10px] text-[#9D54FF] font-semibold mt-1.5 block uppercase tracking-wide">
+                      {opp.eventName} • {opp.commercialPotential || opp.summary}
                     </span>
                   </td>
 

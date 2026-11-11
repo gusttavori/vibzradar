@@ -1,13 +1,13 @@
 /**
  * Radar Vibz - Monitoring Engine
- * Motor de orquestração periódica e varredura de perfis do Instagram
+ * Motor de orquestração periódica, varredura de perfis e descoberta automática de novos alvos
  */
 
 import { db } from '../database';
 import { MetaInstagramProvider, DemoSimulationProvider, InstagramProvider } from './instagramProvider';
 import { aiAnalysisService } from './publicationAnalysisService';
 import { notificationService } from './notificationService';
-import { Profile } from '../../types/radar';
+import { discoveryService } from './discoveryService';
 
 export class MonitoringEngine {
   private metaProvider: MetaInstagramProvider;
@@ -19,8 +19,8 @@ export class MonitoringEngine {
     this.demoProvider = new DemoSimulationProvider();
   }
 
-  private getActiveProvider(): InstagramProvider {
-    const settings = db.getSettings();
+  private async getActiveProvider(): Promise<InstagramProvider> {
+    const settings = await db.getSettings();
     if (settings.instagram.providerMode === 'meta_graph_api') {
       return this.metaProvider;
     }
@@ -28,7 +28,7 @@ export class MonitoringEngine {
   }
 
   /**
-   * Executa uma rodada completa de verificação para os perfis ativos
+   * Executa uma rodada completa de verificação para os perfis ativos e varredura de novos candidatos
    * @param isScheduled Indica se a chamada foi disparada pelo agendador automático
    */
   async runCycleNow(isScheduled: boolean = false): Promise<{
@@ -40,13 +40,12 @@ export class MonitoringEngine {
     details: string;
     skipped?: boolean;
   }> {
-    // Verificação de Lock de concorrência
     if (this.isMonitoring) {
       if (isScheduled) {
-        db.logSystem(
-          'MONITORING',
+        await db.logSystem(
           'WARN',
-          'Varredura agendada ignorada: uma execução anterior ainda está em andamento (Lock ativo).'
+          'MONITORING',
+          'Varredura agendada ignorada: trava de concorrência (Lock ativo).'
         );
         return {
           durationMs: 0,
@@ -65,8 +64,22 @@ export class MonitoringEngine {
     const startTime = Date.now();
 
     try {
-      const settings = db.getSettings();
-      const activeProfiles = db.getProfiles({ status: 'active' }).slice(0, settings.monitoring.maxProfilesPerCycle);
+      const settings = await db.getSettings();
+
+      // 1. DISCOVERY AUTOMÁTICO: Executa varredura de novos perfis reais na região antes de varrer os posts
+      try {
+        await discoveryService.discoverCandidates({
+          city: 'Vitória da Conquista',
+          category: 'Todas as Categorias'
+        });
+      } catch (discErr) {
+        console.warn('[MonitoringEngine] Aviso na descoberta automática de novos perfis:', discErr);
+      }
+
+      const allProfiles = await db.getProfiles();
+      const activeProfiles = allProfiles
+        .filter((p) => p.monitoringStatus === 'active' || p.monitoringStatus === 'failed' || !p.monitoringStatus)
+        .slice(0, settings.monitoring.maxProfilesPerCycle);
 
       let profilesChecked = 0;
       let newPostsFound = 0;
@@ -74,38 +87,53 @@ export class MonitoringEngine {
       let errorsCount = 0;
       const errorDetails: string[] = [];
 
-      const provider = this.getActiveProvider();
-      db.logSystem(
-        'MONITORING',
+      const isMetaApi = settings.instagram.providerMode === 'meta_graph_api';
+      const provider = await this.getActiveProvider();
+      const providerName = isMetaApi ? 'Meta Graph API / Apify Híbrido' : provider.name;
+
+      await db.logSystem(
         'INFO',
-        `Iniciando ciclo de varredura com ${activeProfiles.length} perfis ativos via ${provider.name}${isScheduled ? ' (Agendado)' : ' (Manual)'}.`
+        'MONITORING',
+        `Iniciando ciclo de varredura com ${activeProfiles.length} perfis ativos via ${providerName}${isScheduled ? ' (Agendado)' : ' (Manual)'}.`
       );
 
+      // Loop dinâmico por todos os perfis cadastrados no banco
       for (const profile of activeProfiles) {
+        profilesChecked++;
         try {
-          profilesChecked++;
           const fetchResult = await provider.fetchProfilePosts(profile, {
-            accessToken: settings.instagram.accessToken,
-            pageId: settings.instagram.pageId,
-            apiVersion: settings.instagram.apiVersion
+            accessToken: settings.instagram.accessToken || process.env.META_ACCESS_TOKEN || '',
+            pageId: settings.instagram.pageId || process.env.META_PAGE_ID || '',
+            apiVersion: settings.instagram.apiVersion || 'v21.0'
           });
+
+          // Delay de 1.5s entre requisições para estabilidade de rate limit em terceiros
+          await new Promise(resolve => setTimeout(resolve, 1500));
 
           if (!fetchResult.success) {
             errorsCount++;
-            errorDetails.push(`@${profile.username}: ${fetchResult.error || 'Erro desconhecido'}`);
-            db.updateProfile(profile.id, { monitoringStatus: 'failed' });
+            errorDetails.push(`@${profile.username}: ${fetchResult.error || 'Erro na consulta do provedor'}`);
+            await db.updateProfile(profile.id, { monitoringStatus: 'failed' }).catch(() => {});
             continue;
           }
 
-          // Process newly detected posts
+          // Processa as publicações retornadas da conta
           for (const postData of fetchResult.posts) {
-            const insertResult = db.insertPublication(postData);
-
-            if (insertResult.created) {
-              newPostsFound++;
+            try {
+              const insertResult = await db.insertPublication(postData);
               const publication = insertResult.publication;
+              const isNewlyCreated = insertResult.created; // Verifica se é um post inédito
 
-              // Trigger AI analysis if enabled
+              if (!publication || !publication.id) continue;
+              
+              // SE O POST JÁ EXISTE NO BANCO, IGNORA COMPLETAMENTE (Zero gasto de IA/Token)
+              if (!isNewlyCreated) {
+                continue;
+              }
+
+              newPostsFound++;
+
+              // Análise semântica de IA via Google Gemini (apenas para posts novos)
               if (settings.gemini.autoAnalyzeNewPosts) {
                 try {
                   const analysis = await aiAnalysisService.analyzePublication({
@@ -116,16 +144,16 @@ export class MonitoringEngine {
                     publishedAt: publication.publishedAt
                   });
 
-                  // Update publication with AI result
-                  db.updatePublication(publication.id, {
+                  await db.updatePublication(publication.id, {
                     analysisStatus: 'analyzed',
                     relevance: analysis.relevance,
                     aiAnalysis: analysis
                   });
 
-                  // Create commercial opportunity if qualifies
-                  if (analysis.is_opportunity && (analysis.relevance === 'high' || analysis.relevance === 'medium')) {
-                    const opp = db.createOpportunity({
+                  const isOwnAccount = profile.username.toLowerCase().includes('vibz');
+
+                  if (analysis.is_opportunity && !isOwnAccount && (analysis.relevance === 'high' || analysis.relevance === 'medium')) {
+                    const opp = await db.createOpportunity({
                       publicationId: publication.id,
                       profileId: profile.id,
                       username: profile.username,
@@ -142,41 +170,44 @@ export class MonitoringEngine {
                       commercialPotential: analysis.commercial_opportunity,
                       suggestedAction: analysis.suggested_action,
                       status: 'Nova',
-                      internalNotes: 'Detectada automaticamente pelo motor de monitoramento do Radar Vibz.',
+                      internalNotes: 'Detectada automaticamente pelo motor do Radar Vibz.',
                       isDemo: profile.isDemo
                     });
 
                     newOpportunitiesCount++;
 
-                    // Telegram notification if relevant
                     if (analysis.relevance === 'high' && settings.telegram.enabled) {
-                      await notificationService.notifyOpportunity(opp);
+                      await notificationService.notifyOpportunity(opp).catch(() => {});
                     }
                   }
                 } catch (aiErr) {
-                  console.warn(`Erro na análise de IA para post ${publication.id}:`, aiErr);
+                  console.warn(`[AI Analysis Warning] Falha ao analisar post de @${profile.username}:`, aiErr);
                 }
               }
+            } catch (insertErr) {
+              // Ignora duplicados
             }
           }
 
-          // Update profile status & last checked
-          db.updateProfile(profile.id, {
+          // Atualiza status de sucesso para a conta consultada
+          await db.updateProfile(profile.id, {
             lastCheckedAt: new Date().toISOString(),
             monitoringStatus: 'active'
-          });
+          }).catch(() => {});
+
         } catch (err: unknown) {
           errorsCount++;
-          errorDetails.push(`@${profile.username}: ${err instanceof Error ? err.message : 'Falha na verificação'}`);
+          const msg = err instanceof Error ? err.message : 'Falha na verificação';
+          errorDetails.push(`@${profile.username}: ${msg}`);
+          await db.updateProfile(profile.id, { monitoringStatus: 'failed' }).catch(() => {});
         }
       }
 
       const durationMs = Date.now() - startTime;
 
-      // Update settings timestamps
       const now = new Date();
       const nextRun = new Date(now.getTime() + settings.monitoring.intervalMinutes * 60 * 1000);
-      db.updateSettings({
+      await db.updateSettings({
         monitoring: {
           ...settings.monitoring,
           lastRunAt: now.toISOString(),
@@ -189,19 +220,19 @@ export class MonitoringEngine {
         errorsCount > 0 ? `Falhas (${errorsCount}): ${errorDetails.slice(0, 3).join('; ')}` : 'Sem erros.'
       }`;
 
-      db.addMonitoringLog({
+      await db.addMonitoringLog({
         durationMs,
         profilesChecked,
         newPostsFound,
         errorsCount,
         status,
         details,
-        provider: provider.name
+        provider: providerName
       });
 
-      db.logSystem(
-        'MONITORING',
+      await db.logSystem(
         status === 'success' ? 'SUCCESS' : 'WARN',
+        'MONITORING',
         `Ciclo de varredura concluído. ${newPostsFound} publicações novas encontradas.`
       );
 
@@ -214,7 +245,6 @@ export class MonitoringEngine {
         details
       };
     } finally {
-      // Liberação garantida da trava de concorrência
       this.isMonitoring = false;
     }
   }

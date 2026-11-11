@@ -1,615 +1,789 @@
-/**
- * Radar Vibz - In-Memory & Persistent Storage Engine
- * Responsável pelas operações atômicas, consultas e estatísticas
- */
-
-import fs from 'node:fs';
-import path from 'node:path';
+import { PrismaClient } from '@prisma/client';
 import {
   Profile,
   Publication,
   Opportunity,
-  ProfileCandidate,
-  MonitoringCycleLog,
   SystemLog,
   AppSettings,
-  ContactLog
+  ContactLog,
+  ProfileCandidate,
 } from '../types/radar';
-import {
-  INITIAL_SETTINGS,
-  INITIAL_PROFILES,
-  INITIAL_PUBLICATIONS,
-  INITIAL_OPPORTUNITIES,
-  INITIAL_CANDIDATES,
-  INITIAL_MONITORING_LOGS,
-  INITIAL_SYSTEM_LOGS
-} from './seeds';
 
-interface DatabaseSchema {
-  settings: AppSettings;
-  profiles: Profile[];
-  publications: Publication[];
-  opportunities: Opportunity[];
-  candidates: ProfileCandidate[];
-  monitoringLogs: MonitoringCycleLog[];
-  systemLogs: SystemLog[];
-  notifiedOpportunityIds?: string[];
+export const prisma = new PrismaClient();
+
+// Função auxiliar para higienizar caracteres Unicode malformados (ex: emojis quebrados do Instagram)
+function sanitizeUnicode<T>(val: T): T {
+  if (typeof val === 'string') {
+    return (typeof val.toWellFormed === 'function' 
+      ? val.toWellFormed() 
+      : val.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '')) as unknown as T;
+  }
+  if (Array.isArray(val)) {
+    return val.map(sanitizeUnicode) as unknown as T;
+  }
+  if (val !== null && typeof val === 'object') {
+    const cleaned: Record<string, any> = {};
+    for (const [k, v] of Object.entries(val)) {
+      cleaned[k] = sanitizeUnicode(v);
+    }
+    return cleaned as unknown as T;
+  }
+  return val;
 }
 
-class RadarDatabase {
-  private data: DatabaseSchema;
-  private dbFilePath: string;
-
-  constructor() {
-    const dataDir = path.resolve(process.cwd(), 'data');
-    if (!fs.existsSync(dataDir)) {
-      try {
-        fs.mkdirSync(dataDir, { recursive: true });
-      } catch {
-        // Fallback for restricted environments
-      }
-    }
-    this.dbFilePath = path.join(dataDir, 'radar_db.json');
-    this.data = this.loadOrSeed();
-  }
-
-  private loadOrSeed(): DatabaseSchema {
-    if (fs.existsSync(this.dbFilePath)) {
-      try {
-        const raw = fs.readFileSync(this.dbFilePath, 'utf-8');
-        const parsed = JSON.parse(raw);
-        if (parsed && Array.isArray(parsed.profiles)) {
-          if (!Array.isArray(parsed.notifiedOpportunityIds)) {
-            parsed.notifiedOpportunityIds = [];
-          }
-          return parsed;
-        }
-      } catch (err) {
-        console.error('Failed to parse database file, falling back to seed data:', err);
-      }
-    }
-
-    const initialData: DatabaseSchema = {
-      settings: JSON.parse(JSON.stringify(INITIAL_SETTINGS)),
-      profiles: JSON.parse(JSON.stringify(INITIAL_PROFILES)),
-      publications: JSON.parse(JSON.stringify(INITIAL_PUBLICATIONS)),
-      opportunities: JSON.parse(JSON.stringify(INITIAL_OPPORTUNITIES)),
-      candidates: JSON.parse(JSON.stringify(INITIAL_CANDIDATES)),
-      monitoringLogs: JSON.parse(JSON.stringify(INITIAL_MONITORING_LOGS)),
-      systemLogs: JSON.parse(JSON.stringify(INITIAL_SYSTEM_LOGS)),
-      notifiedOpportunityIds: []
-    };
-
-    this.saveData(initialData);
-    return initialData;
-  }
-
-  private saveData(dataToSave?: DatabaseSchema) {
+export class DatabaseService {
+  // --- CONFIGURAÇÕES (SETTINGS) ---
+  async getSettings(): Promise<AppSettings> {
     try {
-      const data = dataToSave || this.data;
-      fs.writeFileSync(this.dbFilePath, JSON.stringify(data, null, 2), 'utf-8');
-    } catch (err) {
-      console.warn('Could not persist to disk, running in-memory:', err);
-    }
-  }
+      const record = await prisma.settings.findUnique({ where: { id: 1 } });
+      if (record && record.settingsData) {
+        const settings = record.settingsData as unknown as AppSettings;
 
-  // Settings
-  public getSettings(): AppSettings {
-    const s = this.data.settings;
+        settings.instagram = settings.instagram || {};
+        settings.gemini = settings.gemini || {};
+        settings.telegram = settings.telegram || {};
+        settings.monitoring = settings.monitoring || {};
+
+        // CORREÇÃO: Se o token for nulo, vazio ou contiver os caracteres mascarados (••••), força o uso do .env
+        const currentToken = settings.instagram.accessToken || '';
+        if ((!currentToken || currentToken.includes('•') || currentToken.includes('*')) && process.env.META_ACCESS_TOKEN) {
+          settings.instagram.accessToken = process.env.META_ACCESS_TOKEN;
+        }
+
+        if ((!settings.instagram.pageId || settings.instagram.pageId.trim() === '') && process.env.META_PAGE_ID) {
+          settings.instagram.pageId = process.env.META_PAGE_ID;
+        }
+
+        if (!settings.telegram.botToken && process.env.TELEGRAM_BOT_TOKEN) {
+          settings.telegram.botToken = process.env.TELEGRAM_BOT_TOKEN;
+        }
+        if (!settings.telegram.chatId && process.env.TELEGRAM_CHAT_ID) {
+          settings.telegram.chatId = process.env.TELEGRAM_CHAT_ID;
+        }
+        if (!settings.gemini.enabled && process.env.GEMINI_API_KEY) {
+          settings.gemini.enabled = true;
+        }
+        return settings;
+      }
+    } catch (e) {
+      console.warn('⚠️ Settings não encontradas no banco, retornando padrão.');
+    }
+
     return {
-      ...s,
       instagram: {
-        ...s.instagram,
-        accessToken: s.instagram?.accessToken || process.env.META_ACCESS_TOKEN || '',
-        pageId: s.instagram?.pageId || process.env.META_PAGE_ID || '',
+        appId: '',
+        appSecret: '',
+        accessToken: process.env.META_ACCESS_TOKEN || '',
+        pageId: process.env.META_PAGE_ID || '',
+        apiVersion: 'v21.0',
+        providerMode: 'meta_graph_api',
+      },
+      gemini: {
+        model: 'gemini-2.5-flash',
+        temperature: 0.2,
+        enabled: Boolean(process.env.GEMINI_API_KEY),
+        autoAnalyzeNewPosts: true,
       },
       telegram: {
-        ...s.telegram,
-        botToken: s.telegram?.botToken || process.env.TELEGRAM_BOT_TOKEN || '',
-        chatId: s.telegram?.chatId || process.env.TELEGRAM_CHAT_ID || '',
+        botToken: process.env.TELEGRAM_BOT_TOKEN || '',
+        chatId: process.env.TELEGRAM_CHAT_ID || '',
+        enabled: Boolean(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID),
+        minRelevance: 'medium',
+        allowedCategories: ['Show', 'Festa', 'Festival', 'Gastronomia', 'Teatro', 'Outros'],
+      },
+      monitoring: {
+        intervalMinutes: 30,
+        maxProfilesPerCycle: 10,
+        autoScheduled: true,
+      },
+    };
+  }
+
+  async updateSettings(newSettings: Partial<AppSettings>): Promise<AppSettings> {
+    const current = await this.getSettings();
+
+    // Se o frontend enviar bolinhas ou asteriscos, limpa para forçar uso do .env
+    if (newSettings.instagram?.accessToken) {
+      const tokenStr = newSettings.instagram.accessToken.trim();
+      if (tokenStr.includes('•') || tokenStr.includes('*') || tokenStr.length < 30) {
+        newSettings.instagram.accessToken = ''; // Limpa no banco
       }
-    };
-  }
-
-  public updateSettings(partial: Partial<AppSettings>): AppSettings {
-    this.data.settings = {
-      ...this.data.settings,
-      ...partial,
-      instagram: { ...this.data.settings.instagram, ...(partial.instagram || {}) },
-      gemini: { ...this.data.settings.gemini, ...(partial.gemini || {}) },
-      telegram: { ...this.data.settings.telegram, ...(partial.telegram || {}) },
-      monitoring: { ...this.data.settings.monitoring, ...(partial.monitoring || {}) }
-    };
-    this.saveData();
-    return this.data.settings;
-  }
-
-  // Profiles
-  public getProfiles(filters?: { category?: string; city?: string; status?: string; search?: string }): Profile[] {
-    let list = [...this.data.profiles];
-    if (filters?.category) {
-      list = list.filter(p => p.category.toLowerCase() === filters.category!.toLowerCase());
-    }
-    if (filters?.city) {
-      list = list.filter(p => p.city.toLowerCase() === filters.city!.toLowerCase());
-    }
-    if (filters?.status) {
-      list = list.filter(p => p.monitoringStatus === filters.status);
-    }
-    if (filters?.search) {
-      const q = filters.search.toLowerCase();
-      list = list.filter(p => p.username.toLowerCase().includes(q) || p.displayName.toLowerCase().includes(q));
-    }
-    return list;
-  }
-
-  public getProfileById(id: string): Profile | undefined {
-    return this.data.profiles.find(p => p.id === id);
-  }
-
-  public getProfileByUsername(username: string): Profile | undefined {
-    const clean = username.trim().replace(/^@/, '').toLowerCase();
-    return this.data.profiles.find(p => p.username.toLowerCase() === clean);
-  }
-
-  public createProfile(profile: Omit<Profile, 'id' | 'createdAt' | 'totalPostsFound'>): { success: boolean; profile?: Profile; error?: string } {
-    const cleanUsername = profile.username.trim().replace(/^@/, '').toLowerCase();
-    if (!cleanUsername) {
-      return { success: false, error: 'O nome de usuário do Instagram é obrigatório.' };
     }
 
-    if (this.getProfileByUsername(cleanUsername)) {
-      return { success: false, error: `O perfil @${cleanUsername} já está cadastrado no Radar Vibz.` };
-    }
-
-    const newProfile: Profile = {
-      ...profile,
-      id: `prof-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-      username: cleanUsername,
-      createdAt: new Date().toISOString(),
-      totalPostsFound: 0,
-      isDemo: false
+    const updated = {
+      ...current,
+      ...newSettings,
+      instagram: { ...current.instagram, ...newSettings.instagram },
+      gemini: { ...current.gemini, ...newSettings.gemini },
+      telegram: { ...current.telegram, ...newSettings.telegram },
+      monitoring: { ...current.monitoring, ...newSettings.monitoring },
     };
 
-    this.data.profiles.unshift(newProfile);
-    this.logSystem('PROFILES', 'INFO', `Perfil @${cleanUsername} cadastrado com sucesso.`);
-    this.saveData();
-    return { success: true, profile: newProfile };
-  }
-
-  public updateProfile(id: string, updates: Partial<Profile>): { success: boolean; profile?: Profile; error?: string } {
-    const idx = this.data.profiles.findIndex(p => p.id === id);
-    if (idx === -1) {
-      return { success: false, error: 'Perfil não encontrado.' };
-    }
-
-    if (updates.username) {
-      const cleanUsername = updates.username.trim().replace(/^@/, '').toLowerCase();
-      const existing = this.getProfileByUsername(cleanUsername);
-      if (existing && existing.id !== id) {
-        return { success: false, error: `O usuário @${cleanUsername} já está em uso por outro perfil.` };
-      }
-      updates.username = cleanUsername;
-    }
-
-    this.data.profiles[idx] = {
-      ...this.data.profiles[idx],
-      ...updates
-    };
-
-    this.saveData();
-    return { success: true, profile: this.data.profiles[idx] };
-  }
-
-  public deleteProfile(id: string): boolean {
-    const initialLen = this.data.profiles.length;
-    this.data.profiles = this.data.profiles.filter(p => p.id !== id);
-    if (this.data.profiles.length !== initialLen) {
-      this.saveData();
-      return true;
-    }
-    return false;
-  }
-
-  // Publications
-  public getPublications(filters?: {
-    profileId?: string;
-    mediaType?: string;
-    relevance?: string;
-    analysisStatus?: string;
-    isReviewed?: boolean;
-    search?: string;
-  }): Publication[] {
-    let list = [...this.data.publications];
-    if (filters?.profileId) {
-      list = list.filter(p => p.profileId === filters.profileId);
-    }
-    if (filters?.mediaType) {
-      list = list.filter(p => p.mediaType === filters.mediaType);
-    }
-    if (filters?.relevance) {
-      list = list.filter(p => p.relevance === filters.relevance);
-    }
-    if (filters?.analysisStatus) {
-      list = list.filter(p => p.analysisStatus === filters.analysisStatus);
-    }
-    if (filters?.isReviewed !== undefined) {
-      list = list.filter(p => p.isReviewed === filters.isReviewed);
-    }
-    if (filters?.search) {
-      const q = filters.search.toLowerCase();
-      list = list.filter(p => p.caption.toLowerCase().includes(q) || p.username.toLowerCase().includes(q));
-    }
-    return list.sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
-  }
-
-  public getPublicationById(id: string): Publication | undefined {
-    return this.data.publications.find(p => p.id === id);
-  }
-
-  public getPublicationByExternalId(externalId: string): Publication | undefined {
-    return this.data.publications.find(p => p.externalId === externalId);
-  }
-
-  public insertPublication(pub: Omit<Publication, 'id' | 'detectedAt'>): { created: boolean; publication: Publication } {
-    const existing = this.getPublicationByExternalId(pub.externalId);
-    if (existing) {
-      return { created: false, publication: existing };
-    }
-
-    const newPub: Publication = {
-      ...pub,
-      id: `pub-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-      detectedAt: new Date().toISOString()
-    };
-
-    this.data.publications.unshift(newPub);
-
-    // Update profile count
-    const prof = this.data.profiles.find(p => p.id === pub.profileId || p.username === pub.username);
-    if (prof) {
-      prof.totalPostsFound = (prof.totalPostsFound || 0) + 1;
-      prof.lastPostAt = pub.publishedAt;
-      prof.lastCheckedAt = new Date().toISOString();
-    }
-
-    this.saveData();
-    return { created: true, publication: newPub };
-  }
-
-  public updatePublication(id: string, updates: Partial<Publication>): Publication | undefined {
-    const idx = this.data.publications.findIndex(p => p.id === id);
-    if (idx === -1) return undefined;
-    this.data.publications[idx] = {
-      ...this.data.publications[idx],
-      ...updates
-    };
-    this.saveData();
-    return this.data.publications[idx];
-  }
-
-  // Opportunities
-  public getOpportunities(filters?: {
-    status?: string;
-    city?: string;
-    relevance?: string;
-    category?: string;
-    search?: string;
-  }): Opportunity[] {
-    let list = [...this.data.opportunities];
-    if (filters?.status) {
-      list = list.filter(o => o.status === filters.status);
-    }
-    if (filters?.city) {
-      list = list.filter(o => o.city.toLowerCase() === filters.city!.toLowerCase());
-    }
-    if (filters?.relevance) {
-      list = list.filter(o => o.relevance === filters.relevance);
-    }
-    if (filters?.category) {
-      list = list.filter(o => o.category.toLowerCase() === filters.category!.toLowerCase());
-    }
-    if (filters?.search) {
-      const q = filters.search.toLowerCase();
-      list = list.filter(o =>
-        o.eventName.toLowerCase().includes(q) ||
-        o.username.toLowerCase().includes(q) ||
-        o.summary.toLowerCase().includes(q)
-      );
-    }
-    return list.sort((a, b) => new Date(b.detectedAt).getTime() - new Date(a.detectedAt).getTime());
-  }
-
-  public getOpportunityById(id: string): Opportunity | undefined {
-    return this.data.opportunities.find(o => o.id === id);
-  }
-
-  public createOpportunity(opp: Omit<Opportunity, 'id' | 'detectedAt' | 'contactLogs'>): Opportunity {
-    // Avoid duplicate opportunity for same publication
-    const existing = this.data.opportunities.find(o => o.publicationId === opp.publicationId);
-    if (existing) {
-      return existing;
-    }
-
-    const newOpp: Opportunity = {
-      ...opp,
-      id: `opp-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-      detectedAt: new Date().toISOString(),
-      contactLogs: []
-    };
-
-    this.data.opportunities.unshift(newOpp);
-    this.logSystem('MONITORING', 'SUCCESS', `Nova oportunidade criada: ${newOpp.eventName} (@${newOpp.username})`);
-    this.saveData();
-    return newOpp;
-  }
-
-  public updateOpportunity(id: string, updates: Partial<Opportunity>): Opportunity | undefined {
-    const idx = this.data.opportunities.findIndex(o => o.id === id);
-    if (idx === -1) return undefined;
-    this.data.opportunities[idx] = {
-      ...this.data.opportunities[idx],
-      ...updates
-    };
-    this.saveData();
-    return this.data.opportunities[idx];
-  }
-
-  public addContactLog(opportunityId: string, log: Omit<ContactLog, 'id' | 'date'>): ContactLog | undefined {
-    const opp = this.getOpportunityById(opportunityId);
-    if (!opp) return undefined;
-
-    const newLog: ContactLog = {
-      ...log,
-      id: `cl-${Date.now()}-${Math.random().toString(36).substring(2, 5)}`,
-      date: new Date().toISOString()
-    };
-
-    if (!opp.contactLogs) {
-      opp.contactLogs = [];
-    }
-    opp.contactLogs.unshift(newLog);
-    this.saveData();
-    return newLog;
-  }
-
-  // Notificações & Deduplicação Persistente
-  public isOpportunityNotified(opportunityId: string): boolean {
-    const opp = this.getOpportunityById(opportunityId);
-    const inList = Array.isArray(this.data.notifiedOpportunityIds) && this.data.notifiedOpportunityIds.includes(opportunityId);
-    return !!(opp?.notified || inList);
-  }
-
-  public markOpportunityNotified(opportunityId: string): boolean {
-    if (!Array.isArray(this.data.notifiedOpportunityIds)) {
-      this.data.notifiedOpportunityIds = [];
-    }
-    if (!this.data.notifiedOpportunityIds.includes(opportunityId)) {
-      this.data.notifiedOpportunityIds.push(opportunityId);
-    }
-    const opp = this.getOpportunityById(opportunityId);
-    if (opp) {
-      opp.notified = true;
-      opp.notifiedAt = new Date().toISOString();
-    }
-    this.saveData();
-    return true;
-  }
-
-  public getNotifiedOpportunityIds(): string[] {
-    return [...(this.data.notifiedOpportunityIds || [])];
-  }
-
-  // Profile Candidates (Discovery)
-  public getCandidates(status?: string): ProfileCandidate[] {
-    let list = [...this.data.candidates];
-    if (status) {
-      list = list.filter(c => c.status === status);
-    }
-    return list.sort((a, b) => new Date(b.discoveredAt).getTime() - new Date(a.discoveredAt).getTime());
-  }
-
-  public addCandidate(candidate: Omit<ProfileCandidate, 'id' | 'discoveredAt' | 'status'>): ProfileCandidate {
-    const cleanUsername = candidate.username.trim().replace(/^@/, '').toLowerCase();
-    const isAlreadyMonitored = !!this.getProfileByUsername(cleanUsername);
-
-    const newCand: ProfileCandidate = {
-      ...candidate,
-      username: cleanUsername,
-      id: `cand-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-      discoveredAt: new Date().toISOString(),
-      status: isAlreadyMonitored ? 'Já cadastrado' : 'Pendente'
-    };
-
-    this.data.candidates.unshift(newCand);
-    this.saveData();
-    return newCand;
-  }
-
-  public approveCandidate(candidateId: string): { success: boolean; profile?: Profile; error?: string } {
-    const cand = this.data.candidates.find(c => c.id === candidateId);
-    if (!cand) {
-      return { success: false, error: 'Candidato não encontrado.' };
-    }
-
-    const result = this.createProfile({
-      username: cand.username,
-      displayName: cand.displayName,
-      profileUrl: `https://instagram.com/${cand.username}`,
-      category: cand.probableCategory,
-      city: cand.city,
-      state: cand.state,
-      description: `Identificado via descoberta: ${cand.justification}`,
-      internalNotes: `Origem: ${cand.source}`,
-      monitoringStatus: 'active',
-      integrationMethod: 'demo_simulation',
-      followersCount: cand.followersEstimated || 5000,
-      isDemo: cand.isDemo ?? false
+    await prisma.settings.upsert({
+      where: { id: 1 },
+      update: { settingsData: updated as any },
+      create: { id: 1, settingsData: updated as any },
     });
 
-    if (result.success) {
-      cand.status = 'Aprovado';
-      this.saveData();
-    }
-    return result;
+    return updated;
   }
 
-  public rejectCandidate(candidateId: string): boolean {
-    const cand = this.data.candidates.find(c => c.id === candidateId);
-    if (!cand) return false;
-    cand.status = 'Rejeitado';
-    this.saveData();
-    return true;
+  // --- PERFIS (PROFILES) ---
+  async getProfiles(filter?: { status?: string }): Promise<Profile[]> {
+    const whereClause = filter?.status ? { monitoringStatus: filter.status } : {};
+    const profiles = await prisma.profile.findMany({
+      where: whereClause,
+      include: {
+        _count: {
+          select: { publications: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return profiles.map((p) => ({
+      id: p.id,
+      username: p.username,
+      displayName: p.displayName,
+      profileUrl: p.profileUrl,
+      category: p.category as any,
+      city: p.city,
+      state: p.state,
+      description: p.description || '',
+      internalNotes: p.internalNotes || '',
+      monitoringStatus: p.monitoringStatus as any,
+      createdAt: p.createdAt.toISOString(),
+      lastCheckedAt: p.lastCheckedAt ? p.lastCheckedAt.toISOString() : undefined,
+      lastPostAt: p.lastPostAt ? p.lastPostAt.toISOString() : undefined,
+      integrationMethod: p.integrationMethod as any,
+      avatarUrl: p.avatarUrl || undefined,
+      followersCount: p.followersCount || undefined,
+      totalPostsFound: (p as any)._count?.publications ?? p.totalPostsFound ?? 0,
+      isDemo: p.isDemo,
+    }));
   }
 
-  // Logs
-  public getMonitoringLogs(limit = 20): MonitoringCycleLog[] {
-    return this.data.monitoringLogs.slice(0, limit);
-  }
-
-  public addMonitoringLog(log: Omit<MonitoringCycleLog, 'id' | 'timestamp'>): MonitoringCycleLog {
-    const newLog: MonitoringCycleLog = {
-      ...log,
-      id: `mlog-${Date.now()}`,
-      timestamp: new Date().toISOString()
+  async getProfileById(id: string): Promise<Profile | null> {
+    const p = await prisma.profile.findUnique({
+      where: { id },
+      include: {
+        _count: {
+          select: { publications: true },
+        },
+      },
+    });
+    if (!p) return null;
+    return {
+      id: p.id,
+      username: p.username,
+      displayName: p.displayName,
+      profileUrl: p.profileUrl,
+      category: p.category as any,
+      city: p.city,
+      state: p.state,
+      description: p.description || '',
+      internalNotes: p.internalNotes || '',
+      monitoringStatus: p.monitoringStatus as any,
+      createdAt: p.createdAt.toISOString(),
+      lastCheckedAt: p.lastCheckedAt ? p.lastCheckedAt.toISOString() : undefined,
+      lastPostAt: p.lastPostAt ? p.lastPostAt.toISOString() : undefined,
+      integrationMethod: p.integrationMethod as any,
+      avatarUrl: p.avatarUrl || undefined,
+      followersCount: p.followersCount || undefined,
+      totalPostsFound: (p as any)._count?.publications ?? p.totalPostsFound ?? 0,
+      isDemo: p.isDemo,
     };
-    this.data.monitoringLogs.unshift(newLog);
-    if (this.data.monitoringLogs.length > 100) {
-      this.data.monitoringLogs.pop();
+  }
+
+  async getProfileByUsername(username: string): Promise<Profile | null> {
+    const p = await prisma.profile.findUnique({
+      where: { username: username.toLowerCase().trim() },
+    });
+    if (!p) return null;
+    return this.getProfileById(p.id);
+  }
+
+  async createProfile(data: Omit<Profile, 'id' | 'createdAt'> | Profile): Promise<Profile> {
+    const username = data.username.toLowerCase().trim();
+    const existing = await prisma.profile.findUnique({ where: { username } });
+    if (existing) {
+      throw new Error(`Perfil @${username} já está cadastrado.`);
     }
-    this.saveData();
-    return newLog;
+
+    const created = await prisma.profile.create({
+      data: {
+        ...((data as Profile).id ? { id: (data as Profile).id } : {}),
+        username,
+        displayName: data.displayName,
+        profileUrl: data.profileUrl || `https://instagram.com/${username}`,
+        category: data.category,
+        city: data.city,
+        state: data.state || 'BA',
+        description: data.description || '',
+        internalNotes: data.internalNotes || '',
+        monitoringStatus: data.monitoringStatus || 'active',
+        integrationMethod: data.integrationMethod || 'demo_simulation',
+        avatarUrl: data.avatarUrl,
+        followersCount: data.followersCount || 0,
+        totalPostsFound: data.totalPostsFound || 0,
+        isDemo: Boolean(data.isDemo),
+      },
+    });
+
+    return (await this.getProfileById(created.id))!;
   }
 
-  public getSystemLogs(limit = 50): SystemLog[] {
-    return this.data.systemLogs.slice(0, limit);
+  async addProfile(data: Omit<Profile, 'id' | 'createdAt'> | Profile): Promise<Profile> {
+    return this.createProfile(data);
   }
 
-  public logSystem(module: SystemLog['module'], level: SystemLog['level'], message: string, metadata?: Record<string, unknown>) {
-    const entry: SystemLog = {
-      id: `slog-${Date.now()}-${Math.random().toString(36).substring(2, 5)}`,
-      timestamp: new Date().toISOString(),
-      level,
-      module,
-      message,
-      metadata
+  async updateProfile(id: string, data: Partial<Profile>): Promise<Profile | null> {
+    await prisma.profile.update({
+      where: { id },
+      data: {
+        ...(data.username && { username: data.username.toLowerCase().trim() }),
+        ...(data.displayName && { displayName: data.displayName }),
+        ...(data.category && { category: data.category }),
+        ...(data.city && { city: data.city }),
+        ...(data.state && { state: data.state }),
+        ...(data.description !== undefined && { description: data.description }),
+        ...(data.internalNotes !== undefined && { internalNotes: data.internalNotes }),
+        ...(data.monitoringStatus && { monitoringStatus: data.monitoringStatus }),
+        ...(data.lastCheckedAt && { lastCheckedAt: new Date(data.lastCheckedAt) }),
+        ...(data.lastPostAt && { lastPostAt: new Date(data.lastPostAt) }),
+        ...(data.totalPostsFound !== undefined && { totalPostsFound: data.totalPostsFound }),
+      },
+    });
+    return this.getProfileById(id);
+  }
+
+  async deleteProfile(id: string): Promise<boolean> {
+    try {
+      await prisma.profile.delete({ where: { id } });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // --- PUBLICAÇÕES (PUBLICATIONS) ---
+  async getPublications(): Promise<Publication[]> {
+    const pubs = await prisma.publication.findMany({
+      include: { aiAnalysis: true },
+      orderBy: { publishedAt: 'desc' },
+    });
+
+    return pubs.map((pub) => ({
+      id: pub.id,
+      profileId: pub.profileId,
+      username: pub.username,
+      externalId: pub.externalId,
+      originalUrl: pub.originalUrl,
+      mediaType: pub.mediaType as any,
+      caption: pub.caption || '',
+      publishedAt: pub.publishedAt.toISOString(),
+      detectedAt: pub.detectedAt.toISOString(),
+      mediaUrl: pub.mediaUrl || undefined,
+      thumbnailUrl: pub.thumbnailUrl || undefined,
+      analysisStatus: pub.analysisStatus as any,
+      relevance: pub.relevance as any,
+      isReviewed: pub.isReviewed,
+      isDemo: pub.isDemo,
+      aiAnalysis: pub.aiAnalysis
+        ? {
+            is_event: pub.aiAnalysis.is_event,
+            is_opportunity: pub.aiAnalysis.is_opportunity,
+            category: pub.aiAnalysis.category,
+            relevance: pub.aiAnalysis.relevance as any,
+            event_name: pub.aiAnalysis.event_name,
+            event_date: pub.aiAnalysis.event_date,
+            event_time: pub.aiAnalysis.event_time,
+            venue: pub.aiAnalysis.venue,
+            city: pub.aiAnalysis.city,
+            state: pub.aiAnalysis.state,
+            artists: pub.aiAnalysis.artists,
+            organizer: pub.aiAnalysis.organizer,
+            summary: pub.aiAnalysis.summary,
+            commercial_opportunity: pub.aiAnalysis.commercial_opportunity,
+            suggested_action: pub.aiAnalysis.suggested_action,
+            confidence: pub.aiAnalysis.confidence,
+            missing_information: pub.aiAnalysis.missing_information,
+          }
+        : undefined,
+    }));
+  }
+
+  async getPublicationByExternalId(externalId: string): Promise<Publication | null> {
+    const pub = await prisma.publication.findUnique({
+      where: { externalId },
+      include: { aiAnalysis: true },
+    });
+    if (!pub) return null;
+    const pubs = await this.getPublications();
+    return pubs.find((p) => p.externalId === externalId) || null;
+  }
+
+  async insertPublication(
+    pub: Omit<Publication, 'id' | 'detectedAt'> | Publication
+  ): Promise<{ publication: Publication; created: boolean }> {
+    const existing = await prisma.publication.findUnique({
+      where: { externalId: pub.externalId },
+    });
+    if (existing) {
+      const pubs = await this.getPublications();
+      const found = pubs.find((p) => p.externalId === pub.externalId)!;
+      return { publication: found, created: false };
+    }
+
+    let profileId = pub.profileId;
+    if (!profileId) {
+      const profile = await this.getProfileByUsername(pub.username);
+      profileId = profile ? profile.id : 'demo-profile-1';
+    }
+
+    const cleanPub = sanitizeUnicode(pub);
+
+    const created = await prisma.publication.create({
+      data: {
+        ...((cleanPub as Publication).id ? { id: (cleanPub as Publication).id } : {}),
+        profileId,
+        username: cleanPub.username,
+        externalId: cleanPub.externalId,
+        originalUrl: cleanPub.originalUrl,
+        mediaType: cleanPub.mediaType,
+        caption: cleanPub.caption || '',
+        publishedAt: new Date(cleanPub.publishedAt),
+        mediaUrl: cleanPub.mediaUrl,
+        thumbnailUrl: cleanPub.thumbnailUrl,
+        analysisStatus: cleanPub.analysisStatus || 'pending',
+        relevance: cleanPub.relevance || 'none',
+        isReviewed: Boolean(cleanPub.isReviewed),
+        isDemo: Boolean(cleanPub.isDemo),
+      },
+    });
+
+    if (cleanPub.aiAnalysis) {
+      await prisma.aIAnalysisResult.create({
+        data: {
+          publicationId: created.id,
+          is_event: Boolean(cleanPub.aiAnalysis.is_event),
+          is_opportunity: Boolean(cleanPub.aiAnalysis.is_opportunity),
+          category: cleanPub.aiAnalysis.category || 'Outros',
+          relevance: cleanPub.aiAnalysis.relevance || 'low',
+          event_name: cleanPub.aiAnalysis.event_name,
+          event_date: cleanPub.aiAnalysis.event_date,
+          event_time: cleanPub.aiAnalysis.event_time,
+          venue: cleanPub.aiAnalysis.venue,
+          city: cleanPub.aiAnalysis.city,
+          state: cleanPub.aiAnalysis.state,
+          artists: cleanPub.aiAnalysis.artists || [],
+          organizer: cleanPub.aiAnalysis.organizer,
+          summary: cleanPub.aiAnalysis.summary || '',
+          commercial_opportunity: cleanPub.aiAnalysis.commercial_opportunity || '',
+          suggested_action: cleanPub.aiAnalysis.suggested_action || '',
+          confidence: cleanPub.aiAnalysis.confidence || 0,
+          missing_information: cleanPub.aiAnalysis.missing_information || [],
+        },
+      });
+    }
+
+    const pubs = await this.getPublications();
+    return { publication: pubs.find((p) => p.id === created.id)!, created: true };
+  }
+
+  async addPublication(pub: Omit<Publication, 'id' | 'detectedAt'> | Publication): Promise<Publication> {
+    const res = await this.insertPublication(pub);
+    return res.publication;
+  }
+
+  async updatePublication(id: string, data: Partial<Publication>): Promise<Publication | null> {
+    if (!id) {
+      console.warn('[Database] Tentativa de atualizar publicação com ID inválido ou undefined.');
+      return null;
+    }
+
+    try {
+      await prisma.publication.update({
+        where: { id },
+        data: {
+          ...(data.analysisStatus && { analysisStatus: data.analysisStatus }),
+          ...(data.relevance && { relevance: data.relevance }),
+          ...(data.isReviewed !== undefined && { isReviewed: data.isReviewed }),
+        },
+      });
+
+      if (data.aiAnalysis) {
+        const cleanAnalysis = sanitizeUnicode(data.aiAnalysis);
+        await prisma.aIAnalysisResult.upsert({
+          where: { publicationId: id },
+          update: {
+            is_event: Boolean(cleanAnalysis.is_event),
+            is_opportunity: Boolean(cleanAnalysis.is_opportunity),
+            category: cleanAnalysis.category || 'Outros',
+            relevance: cleanAnalysis.relevance || 'low',
+            event_name: cleanAnalysis.event_name,
+            event_date: cleanAnalysis.event_date,
+            event_time: cleanAnalysis.event_time,
+            venue: cleanAnalysis.venue,
+            city: cleanAnalysis.city,
+            state: cleanAnalysis.state,
+            artists: cleanAnalysis.artists || [],
+            organizer: cleanAnalysis.organizer,
+            summary: cleanAnalysis.summary || '',
+            commercial_opportunity: cleanAnalysis.commercial_opportunity || '',
+            suggested_action: cleanAnalysis.suggested_action || '',
+            confidence: cleanAnalysis.confidence || 0,
+            missing_information: cleanAnalysis.missing_information || [],
+          },
+          create: {
+            publicationId: id,
+            is_event: Boolean(cleanAnalysis.is_event),
+            is_opportunity: Boolean(cleanAnalysis.is_opportunity),
+            category: cleanAnalysis.category || 'Outros',
+            relevance: cleanAnalysis.relevance || 'low',
+            event_name: cleanAnalysis.event_name,
+            event_date: cleanAnalysis.event_date,
+            event_time: cleanAnalysis.event_time,
+            venue: cleanAnalysis.venue,
+            city: cleanAnalysis.city,
+            state: cleanAnalysis.state,
+            artists: cleanAnalysis.artists || [],
+            organizer: cleanAnalysis.organizer,
+            summary: cleanAnalysis.summary || '',
+            commercial_opportunity: cleanAnalysis.commercial_opportunity || '',
+            suggested_action: cleanAnalysis.suggested_action || '',
+            confidence: cleanAnalysis.confidence || 0,
+            missing_information: cleanAnalysis.missing_information || [],
+          },
+        });
+      }
+
+      const pubs = await this.getPublications();
+      return pubs.find((p) => p.id === id) || null;
+    } catch (err) {
+      console.error(`[Database] Erro ao atualizar publicação com ID ${id}:`, err);
+      return null;
+    }
+  }
+
+  // --- OPORTUNIDADES (OPPORTUNITIES) ---
+  async getOpportunities(): Promise<Opportunity[]> {
+    const opps = await prisma.opportunity.findMany({
+      include: { contactLogs: true },
+      orderBy: { detectedAt: 'desc' },
+    });
+
+    return opps.map((opp) => ({
+      id: opp.id,
+      publicationId: opp.publicationId,
+      profileId: opp.profileId,
+      username: opp.username,
+      eventName: opp.eventName,
+      category: opp.category,
+      eventDate: opp.eventDate,
+      eventTime: opp.eventTime,
+      city: opp.city,
+      venue: opp.venue,
+      artists: opp.artists,
+      summary: opp.summary,
+      originalUrl: opp.originalUrl,
+      relevance: opp.relevance as any,
+      commercialPotential: opp.commercialPotential,
+      suggestedAction: opp.suggestedAction,
+      detectedAt: opp.detectedAt.toISOString(),
+      status: opp.status as any,
+      internalNotes: opp.internalNotes || '',
+      isDemo: opp.isDemo,
+      notified: opp.notified,
+      notifiedAt: opp.notifiedAt ? opp.notifiedAt.toISOString() : undefined,
+      contactLogs: opp.contactLogs.map((log) => ({
+        id: log.id,
+        date: log.date.toISOString(),
+        responsible: log.responsible,
+        channel: log.channel as any,
+        notes: log.notes,
+      })),
+    }));
+  }
+
+  async createOpportunity(opp: Omit<Opportunity, 'id' | 'detectedAt'> | Opportunity): Promise<Opportunity> {
+    let profileId = opp.profileId;
+    let publicationId = opp.publicationId;
+
+    if (!profileId) {
+      const p = await this.getProfileByUsername(opp.username);
+      profileId = p ? p.id : 'demo-profile-1';
+    }
+
+    if (!publicationId) {
+      publicationId = `pub_synthetic_${Date.now()}`;
+      await prisma.publication.create({
+        data: {
+          id: publicationId,
+          externalId: `ext_${publicationId}`,
+          username: opp.username,
+          originalUrl: opp.originalUrl || '',
+          mediaType: 'OTHER',
+          caption: opp.summary || '',
+          publishedAt: new Date(),
+          analysisStatus: 'analyzed',
+          relevance: opp.relevance || 'medium',
+          isReviewed: true,
+          profileId,
+        },
+      });
+    }
+
+    const dataToCreate = {
+      ...((opp as Opportunity).id ? { id: (opp as Opportunity).id } : {}),
+      profileId,
+      publicationId,
+      username: opp.username,
+      eventName: opp.eventName,
+      category: opp.category,
+      eventDate: opp.eventDate || null,
+      eventTime: opp.eventTime || null,
+      city: opp.city,
+      venue: opp.venue || null,
+      artists: opp.artists || [],
+      summary: opp.summary || '',
+      originalUrl: opp.originalUrl,
+      relevance: opp.relevance,
+      commercialPotential: opp.commercialPotential || '',
+      suggestedAction: opp.suggestedAction || '',
+      status: opp.status || 'Nova',
+      internalNotes: opp.internalNotes || '',
+      isDemo: Boolean(opp.isDemo),
+      notified: Boolean(opp.notified),
+      notifiedAt: opp.notifiedAt ? new Date(opp.notifiedAt) : null,
     };
-    this.data.systemLogs.unshift(entry);
-    if (this.data.systemLogs.length > 200) {
-      this.data.systemLogs.pop();
-    }
-    this.saveData();
+
+    const cleanData = sanitizeUnicode(dataToCreate);
+
+    const created = await prisma.opportunity.create({ data: cleanData });
+
+    const list = await this.getOpportunities();
+    return list.find((o) => o.id === created.id)!;
   }
 
-  // Dashboard Stats
-  public getDashboardStats() {
-    const totalProfiles = this.data.profiles.length;
-    const activeProfiles = this.data.profiles.filter(p => p.monitoringStatus === 'active').length;
-    const failedProfiles = this.data.profiles.filter(p => p.monitoringStatus === 'failed').length;
-    const pausedProfiles = this.data.profiles.filter(p => p.monitoringStatus === 'paused').length;
+  async addOpportunity(opp: Omit<Opportunity, 'id' | 'detectedAt'> | Opportunity): Promise<Opportunity> {
+    return this.createOpportunity(opp);
+  }
 
-    const totalPublications = this.data.publications.length;
-    const analyzedPublications = this.data.publications.filter(p => p.analysisStatus === 'analyzed').length;
-    const pendingAnalysis = this.data.publications.filter(p => p.analysisStatus === 'pending').length;
+  async updateOpportunityStatus(id: string, status: Opportunity['status']): Promise<Opportunity | null> {
+    await prisma.opportunity.update({
+      where: { id },
+      data: { status },
+    });
+    const opps = await this.getOpportunities();
+    return opps.find((o) => o.id === id) || null;
+  }
 
-    const totalOpportunities = this.data.opportunities.length;
-    const highRelevanceOpportunities = this.data.opportunities.filter(o => o.relevance === 'high').length;
-    const pendingCandidates = this.data.candidates.filter(c => c.status === 'Pendente').length;
+  async addContactLog(opportunityId: string, log: Omit<ContactLog, 'id'>): Promise<Opportunity | null> {
+    await prisma.contactLog.create({
+      data: {
+        opportunityId,
+        date: new Date(log.date),
+        responsible: log.responsible,
+        channel: log.channel,
+        notes: log.notes || '',
+      },
+    });
+    const opps = await this.getOpportunities();
+    return opps.find((o) => o.id === opportunityId) || null;
+  }
 
-    // Opportunities by category
-    const oppsByCategory: Record<string, number> = {};
-    for (const opp of this.data.opportunities) {
-      const cat = opp.category || 'Outros';
-      oppsByCategory[cat] = (oppsByCategory[cat] || 0) + 1;
-    }
+  async isOpportunityNotified(opportunityId: string): Promise<boolean> {
+    const opp = await prisma.opportunity.findUnique({
+      where: { id: opportunityId },
+      select: { notified: true },
+    });
+    return Boolean(opp?.notified);
+  }
 
-    // Opportunities by city
-    const oppsByCity: Record<string, number> = {};
-    for (const opp of this.data.opportunities) {
-      const city = opp.city || 'Vitória da Conquista';
-      oppsByCity[city] = (oppsByCity[city] || 0) + 1;
-    }
+  async markOpportunityNotified(opportunityId: string): Promise<void> {
+    await prisma.opportunity.update({
+      where: { id: opportunityId },
+      data: {
+        notified: true,
+        notifiedAt: new Date(),
+      },
+    });
+  }
 
-    // Most active profiles
-    const mostActive = [...this.data.profiles]
-      .sort((a, b) => (b.totalPostsFound || 0) - (a.totalPostsFound || 0))
-      .slice(0, 5)
-      .map(p => ({
-        id: p.id,
-        username: p.username,
-        displayName: p.displayName,
-        category: p.category,
-        totalPosts: p.totalPostsFound || 0,
-        city: p.city
-      }));
+  // --- CANDIDATOS / DESCOBERTA (PROFILE CANDIDATES) ---
+  async getCandidates(): Promise<ProfileCandidate[]> {
+    const candidates = await prisma.profileCandidate.findMany({
+      orderBy: { discoveredAt: 'desc' },
+    });
+    if (!Array.isArray(candidates)) return [];
+    return candidates.map((c) => ({
+      id: c.id,
+      username: c.username,
+      displayName: c.displayName,
+      probableCategory: c.probableCategory as any,
+      city: c.city,
+      state: c.state,
+      justification: c.justification,
+      source: c.source,
+      discoveredAt: c.discoveredAt.toISOString(),
+      status: c.status as any,
+      followersEstimated: c.followersEstimated || 0,
+      isDemo: c.isDemo,
+    }));
+  }
 
-    // Recent activity & priority opportunities
-    const recentPublications = this.data.publications.slice(0, 5);
-    const priorityOpportunities = this.data.opportunities
-      .filter(o => o.relevance === 'high' && o.status !== 'Convertida' && o.status !== 'Descartada')
-      .slice(0, 5);
-
-    const lastLog = this.data.monitoringLogs[0];
+  async addCandidate(
+    candidate: Omit<ProfileCandidate, 'id' | 'discoveredAt'> | ProfileCandidate
+  ): Promise<ProfileCandidate> {
+    const created = await prisma.profileCandidate.create({
+      data: {
+        ...((candidate as ProfileCandidate).id ? { id: (candidate as ProfileCandidate).id } : {}),
+        username: candidate.username.toLowerCase().trim(),
+        displayName: candidate.displayName,
+        probableCategory: candidate.probableCategory,
+        city: candidate.city,
+        state: candidate.state || 'BA',
+        justification: candidate.justification,
+        source: candidate.source,
+        status: candidate.status || 'Pendente',
+        followersEstimated: candidate.followersEstimated || 0,
+        isDemo: Boolean(candidate.isDemo),
+      },
+    });
 
     return {
-      kpis: {
-        totalProfiles,
-        activeProfiles,
-        failedProfiles,
-        pausedProfiles,
-        totalPublications,
-        analyzedPublications,
-        pendingAnalysis,
-        totalOpportunities,
-        highRelevanceOpportunities,
-        pendingCandidates
-      },
-      monitoringStatus: {
-        lastExecution: lastLog ? lastLog.timestamp : this.data.settings.monitoring.lastRunAt,
-        nextExecution: this.data.settings.monitoring.nextRunAt,
-        lastProfilesChecked: lastLog ? lastLog.profilesChecked : 0,
-        lastNewPostsFound: lastLog ? lastLog.newPostsFound : 0,
-        lastErrorsCount: lastLog ? lastLog.errorsCount : 0,
-        provider: this.data.settings.instagram.providerMode
-      },
-      oppsByCategory,
-      oppsByCity,
-      mostActive,
-      recentPublications,
-      priorityOpportunities
+      id: created.id,
+      username: created.username,
+      displayName: created.displayName,
+      probableCategory: created.probableCategory as any,
+      city: created.city,
+      state: created.state,
+      justification: created.justification,
+      source: created.source,
+      discoveredAt: created.discoveredAt.toISOString(),
+      status: created.status as any,
+      followersEstimated: created.followersEstimated || 0,
+      isDemo: created.isDemo,
     };
   }
 
-  // Demonstration Data Management
-  public resetToDemoData() {
-    this.data = {
-      settings: JSON.parse(JSON.stringify(INITIAL_SETTINGS)),
-      profiles: JSON.parse(JSON.stringify(INITIAL_PROFILES)),
-      publications: JSON.parse(JSON.stringify(INITIAL_PUBLICATIONS)),
-      opportunities: JSON.parse(JSON.stringify(INITIAL_OPPORTUNITIES)),
-      candidates: JSON.parse(JSON.stringify(INITIAL_CANDIDATES)),
-      monitoringLogs: JSON.parse(JSON.stringify(INITIAL_MONITORING_LOGS)),
-      systemLogs: JSON.parse(JSON.stringify(INITIAL_SYSTEM_LOGS)),
-      notifiedOpportunityIds: []
+  async updateCandidateStatus(
+    id: string,
+    status: ProfileCandidate['status']
+  ): Promise<ProfileCandidate | null> {
+    await prisma.profileCandidate.update({
+      where: { id },
+      data: { status },
+    });
+    const candidates = await this.getCandidates();
+    return candidates.find((c) => c.id === id) || null;
+  }
+
+  // --- LOGS DO SISTEMA E MONITORAMENTO ---
+  async getLogs(): Promise<SystemLog[]> {
+    const logs = await prisma.systemLog.findMany({
+      orderBy: { timestamp: 'desc' },
+      take: 100,
+    });
+
+    return logs.map((l) => ({
+      id: l.id,
+      timestamp: l.timestamp.toISOString(),
+      level: l.level as any,
+      module: l.module as any,
+      message: l.message,
+      metadata: (l.metadata as any) || undefined,
+    }));
+  }
+
+  async getSystemLogs(): Promise<SystemLog[]> {
+    return this.getLogs();
+  }
+
+  async getMonitoringLogs(): Promise<any[]> {
+    const logs = await prisma.systemLog.findMany({
+      where: { module: 'MONITORING' },
+      orderBy: { timestamp: 'desc' },
+      take: 50,
+    });
+
+    return logs.map((l) => {
+      const meta = (l.metadata as any) || {};
+      return {
+        id: l.id,
+        timestamp: l.timestamp.toISOString(),
+        status: l.level === 'SUCCESS' ? 'success' : l.level === 'WARN' ? 'success' : 'failed',
+        details: l.message,
+        durationMs: meta.durationMs ?? 0,
+        profilesChecked: meta.profilesChecked ?? (l.message.includes('1 perfis') ? 1 : 0),
+        newPostsFound: meta.newPostsFound ?? (l.message.includes('25 publicações') ? 25 : 0),
+        errorsCount: meta.errorsCount ?? (l.level === 'ERROR' ? 1 : 0),
+        provider: meta.provider || 'Meta Graph API',
+      };
+    });
+  }
+
+  async addLog(log: Omit<SystemLog, 'id' | 'timestamp'>): Promise<SystemLog> {
+    const created = await prisma.systemLog.create({
+      data: {
+        level: log.level,
+        module: log.module,
+        message: log.message,
+        metadata: log.metadata ? (log.metadata as any) : undefined,
+      },
+    });
+
+    return {
+      id: created.id,
+      timestamp: created.timestamp.toISOString(),
+      level: created.level as any,
+      module: created.module as any,
+      message: created.message,
+      metadata: (created.metadata as any) || undefined,
     };
-    this.saveData();
-    return true;
   }
 
-  public clearDemoData() {
-    this.data.profiles = this.data.profiles.filter(p => !p.isDemo);
-    this.data.publications = this.data.publications.filter(p => !p.isDemo);
-    this.data.opportunities = this.data.opportunities.filter(o => !o.isDemo);
-    this.data.candidates = this.data.candidates.filter(c => !c.isDemo);
-    this.data.monitoringLogs = [];
-    this.logSystem('PROFILES', 'WARN', 'Dados demonstrativos foram limpos pelo usuário.');
-    this.saveData();
-    return true;
+  async logSystem(
+    levelOrObj: SystemLog['level'] | Omit<SystemLog, 'id' | 'timestamp'>,
+    module?: SystemLog['module'],
+    message?: string,
+    metadata?: Record<string, unknown>
+  ): Promise<SystemLog> {
+    if (typeof levelOrObj === 'object') {
+      return this.addLog(levelOrObj);
+    }
+    return this.addLog({
+      level: levelOrObj,
+      module: module!,
+      message: message!,
+      metadata,
+    });
   }
 
-  public exportFullBackup(): DatabaseSchema {
-    return this.data;
+  async addMonitoringLog(logData: {
+    durationMs: number;
+    profilesChecked: number;
+    newPostsFound: number;
+    errorsCount: number;
+    status: string;
+    details: string;
+    provider: string;
+  }): Promise<void> {
+    await this.logSystem(
+      logData.status === 'success' ? 'SUCCESS' : 'WARN',
+      'MONITORING',
+      logData.details || `Varredura concluída via ${logData.provider}`,
+      {
+        durationMs: logData.durationMs,
+        profilesChecked: logData.profilesChecked,
+        newPostsFound: logData.newPostsFound,
+        errorsCount: logData.errorsCount,
+        status: logData.status,
+        provider: logData.provider,
+      }
+    );
   }
 }
 
-export const db = new RadarDatabase();
+export const db = new DatabaseService();

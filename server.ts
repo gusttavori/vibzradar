@@ -2,7 +2,7 @@
  * Radar Vibz - Full-Stack Express Server & Vite Dev Middleware
  * Porta: 3000
  */
-
+import 'dotenv/config';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'node:path';
@@ -23,13 +23,17 @@ async function startServer() {
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true }));
 
-  // Mount API endpoints
-  app.use('/api', apiRouter);
-
   // Healthcheck endpoint
   app.get('/api/health', (_req, res) => {
-    res.json({ status: 'ok', app: 'Radar Vibz', timestamp: new Date().toISOString() });
+    res.json({
+      status: 'ok',
+      app: 'Radar Vibz',
+      timestamp: new Date().toISOString()
+    });
   });
+
+  // Rotas da API
+  app.use('/api', apiRouter);
 
   const isProduction = process.env.NODE_ENV === 'production';
 
@@ -47,13 +51,13 @@ async function startServer() {
   }
 
   const server = app.listen(port, '0.0.0.0', () => {
-    console.log(`[Radar Vibz] Server running on http://0.0.0.0:${port}`);
+    console.log(`[Radar Vibz] Servidor rodando em http://0.0.0.0:${port}`);
     // Inicializa o serviço de agendamento automático junto com o servidor Express
     schedulerService.init();
   });
 
   const shutdown = () => {
-    console.log('[Radar Vibz] Shutting down scheduler and server...');
+    console.log('[Radar Vibz] Encerrando o scheduler e o servidor HTTP...');
     schedulerService.stop();
     server.close(() => {
       process.exit(0);
@@ -65,6 +69,6 @@ async function startServer() {
 }
 
 startServer().catch(err => {
-  console.error('[Radar Vibz] Failed to start server:', err);
+  console.error('[Radar Vibz] Falha ao iniciar o servidor:', err);
   process.exit(1);
 });

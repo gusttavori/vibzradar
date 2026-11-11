@@ -17,7 +17,7 @@ export interface SchedulerStatus {
 }
 
 /**
- * Converte um intervalo em minutos para uma expressão cron padrão
+ * Converte um intervalo em minutos para uma expressão cron padrão com espaçamento correto
  */
 export function getCronExpressionForMinutes(intervalMinutes: number): string {
   if (!intervalMinutes || intervalMinutes < 1) {
@@ -43,22 +43,22 @@ export class SchedulerService {
   private currentIntervalMinutes: number = 30;
 
   /**
-   * Inicializa o agendador com base nas configurações persistidas no banco JSON
+   * Inicializa o agendador com base nas configurações persistidas no PostgreSQL via Prisma
    */
-  public init(): void {
-    this.reload(true);
+  public async init(): Promise<void> {
+    await this.reload(true);
   }
 
   /**
    * Recria ou atualiza o agendador se as configurações sofrerem mutação
    */
-  public reload(force: boolean = false): void {
-    const settings = db.getSettings();
-    const autoScheduled = !!settings.monitoring.autoScheduled;
-    const intervalMinutes = Number(settings.monitoring.intervalMinutes) || 30;
+  public async reload(force: boolean = false): Promise<void> {
+    const settings = await db.getSettings();
+    const autoScheduled = !!settings.monitoring?.autoScheduled;
+    const intervalMinutes = Number(settings.monitoring?.intervalMinutes) || 30;
     const cronExpression = getCronExpressionForMinutes(intervalMinutes);
 
-    // Se nada mudou e já está ativo, evita churn de tarefas
+    // Se nada mudou e já está ativo, evita recriação desnecessária de tarefas
     if (
       !force &&
       this.cronTask &&
@@ -76,9 +76,9 @@ export class SchedulerService {
     this.currentCronExpression = cronExpression;
 
     if (!autoScheduled) {
-      db.logSystem(
-        'MONITORING',
+      await db.logSystem(
         'INFO',
+        'MONITORING',
         'Agendador de monitoramento desativado (autoScheduled = false nas configurações).'
       );
       console.log('[Radar Vibz Scheduler] Monitoramento automático pausado nas configurações.');
@@ -94,22 +94,23 @@ export class SchedulerService {
       this.cronTask = cron.schedule(this.currentCronExpression, async () => {
         console.log(`[Radar Vibz Scheduler] Disparando ciclo agendado em ${new Date().toISOString()}...`);
         try {
+          // Executa APENAS o ciclo de monitoramento base do sistema unificado
           await monitoringEngine.runCycleNow(true);
         } catch (err) {
           console.error('[Radar Vibz Scheduler] Falha na execução do ciclo agendado:', err);
         }
       });
 
-      db.logSystem(
-        'MONITORING',
+      await db.logSystem(
         'INFO',
+        'MONITORING',
         `Agendador de monitoramento ativado: intervalo ${intervalMinutes}m (cron: "${this.currentCronExpression}").`
       );
       console.log(`[Radar Vibz Scheduler] Agendador ativo com cron "${this.currentCronExpression}" (${intervalMinutes} min).`);
     } catch (err) {
-      db.logSystem(
-        'MONITORING',
+      await db.logSystem(
         'ERROR',
+        'MONITORING',
         `Falha ao iniciar tarefa cron: ${err instanceof Error ? err.message : String(err)}`
       );
       console.error('[Radar Vibz Scheduler] Falha ao registrar tarefa cron:', err);
@@ -129,15 +130,15 @@ export class SchedulerService {
   /**
    * Obtém o status operacional do agendador
    */
-  public getStatus(): SchedulerStatus {
-    const settings = db.getSettings();
+  public async getStatus(): Promise<SchedulerStatus> {
+    const settings = await db.getSettings();
     return {
       isRunning: !!this.cronTask && this.isEnabled,
-      autoScheduled: !!settings.monitoring.autoScheduled,
-      intervalMinutes: settings.monitoring.intervalMinutes,
+      autoScheduled: !!settings.monitoring?.autoScheduled,
+      intervalMinutes: settings.monitoring?.intervalMinutes || 30,
       cronExpression: this.currentCronExpression,
-      lastRunAt: settings.monitoring.lastRunAt || null,
-      nextRunAt: settings.monitoring.nextRunAt || null
+      lastRunAt: settings.monitoring?.lastRunAt || null,
+      nextRunAt: settings.monitoring?.nextRunAt || null,
     };
   }
 }

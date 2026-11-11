@@ -123,11 +123,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
-  const handleTestInstagram = async () => {
+const handleTestInstagram = async () => {
     setTestingInstagram(true);
     setInstagramTestResult(null);
+
+    // Se o input contiver bolinhas ou estiver vazio, envia vazio para forçar o backend a usar o .env
+    const cleanToken = (accessToken.includes('•') || accessToken.includes('*')) ? '' : accessToken.trim();
+
     try {
-      const res = await api.testInstagram({ accessToken, pageId, apiVersion });
+      const res = await api.testInstagram({ 
+        accessToken: cleanToken, 
+        pageId: pageId.trim(), 
+        apiVersion 
+      });
       setInstagramTestResult(res);
     } catch (err: unknown) {
       setInstagramTestResult({
@@ -278,13 +286,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
               <div className="md:col-span-2">
                 <label className="block text-gray-300 font-medium mb-1">Meta Graph Access Token (Long-Lived)</label>
-                <input
-                  type="password"
-                  placeholder="EAAG..."
-                  value={accessToken}
-                  onChange={e => setAccessToken(e.target.value)}
-                  className="w-full bg-[#101016] border border-[#262635] rounded-lg p-2.5 text-white focus:outline-none focus:border-[#4C01B5] font-mono text-[11px]"
-                />
+<input
+  type="password"
+  placeholder={accessToken.includes('•') ? "Token ativo via .env (deixe em branco para manter)" : "EAAG..."}
+  value={accessToken}
+  onChange={e => setAccessToken(e.target.value)}
+  className="w-full bg-[#101016] border border-[#262635] rounded-lg p-2.5 text-white focus:outline-none focus:border-[#4C01B5] font-mono text-[11px]"
+/>
                 <span className="text-[10px] text-gray-500 block mt-1">
                   Requer permissões: <code className="text-gray-400">instagram_basic</code>, <code className="text-gray-400">pages_show_list</code>.
                 </span>

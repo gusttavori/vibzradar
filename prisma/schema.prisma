@@ -1,0 +1,188 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Profile {
+  id                String        @id @default(uuid())
+  username          String        @unique
+  displayName       String
+  profileUrl        String
+  category          String
+  city              String
+  state             String
+  description       String?       @db.Text
+  internalNotes     String?       @db.Text
+  monitoringStatus  String
+  createdAt         DateTime      @default(now())
+  lastCheckedAt     DateTime?
+  lastPostAt        DateTime?
+  integrationMethod String
+  avatarUrl         String?
+  followersCount    Int?
+  totalPostsFound   Int?          @default(0)
+  isDemo            Boolean       @default(false)
+
+  // Relacionamentos
+  publications      Publication[]
+  opportunities     Opportunity[]
+
+  @@map("profiles")
+}
+
+model Publication {
+  id             String            @id @default(uuid())
+  externalId     String            @unique // Unique Instagram Media ID
+  username       String
+  originalUrl    String
+  mediaType      String
+  caption        String?           @db.Text
+  publishedAt    DateTime
+  detectedAt     DateTime          @default(now())
+  mediaUrl       String?
+  thumbnailUrl   String?
+  analysisStatus String
+  relevance      String
+  isReviewed     Boolean           @default(false)
+  isDemo         Boolean           @default(false)
+
+  // Foreign Key para Profile
+  profileId      String
+  profile        Profile           @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  // Relacionamentos
+  aiAnalysis     AIAnalysisResult?
+  opportunities  Opportunity[]
+
+  @@map("publications")
+}
+
+model AIAnalysisResult {
+  id                     String      @id @default(uuid())
+  is_event               Boolean
+  is_opportunity         Boolean
+  category               String
+  relevance              String
+  event_name             String?
+  event_date             String?
+  event_time             String?
+  venue                  String?
+  city                   String?
+  state                  String?
+  artists                String[]
+  organizer              String?
+  summary                String      @db.Text
+  commercial_opportunity String      @db.Text
+  suggested_action       String      @db.Text
+  confidence             Float
+  missing_information    String[]
+
+  // Foreign Key para Publication (1 para 1)
+  publicationId          String      @unique
+  publication            Publication @relation(fields: [publicationId], references: [id], onDelete: Cascade)
+
+  @@map("ai_analysis_results")
+}
+
+model Opportunity {
+  id                  String       @id @default(uuid())
+  username            String
+  eventName           String
+  category            String
+  eventDate           String?
+  eventTime           String?
+  city                String
+  venue               String?
+  artists             String[]
+  summary             String       @db.Text
+  originalUrl         String
+  relevance           String
+  commercialPotential String       @db.Text
+  suggestedAction     String       @db.Text
+  detectedAt          DateTime     @default(now())
+  status              String
+  internalNotes       String?      @db.Text
+  isDemo              Boolean      @default(false)
+  notified            Boolean      @default(false)
+  notifiedAt          DateTime?
+
+  // Relacionamentos (Foreign Keys)
+  profileId           String
+  profile             Profile      @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  publicationId       String
+  publication         Publication  @relation(fields: [publicationId], references: [id], onDelete: Cascade)
+
+  contactLogs         ContactLog[]
+
+  @@map("opportunities")
+}
+
+model ContactLog {
+  id            String      @id @default(uuid())
+  date          DateTime
+  responsible   String
+  channel       String
+  notes         String      @db.Text
+
+  // Foreign Key para Opportunity
+  opportunityId String
+  opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  @@map("contact_logs")
+}
+
+model SystemLog {
+  id        String   @id @default(uuid())
+  timestamp DateTime @default(now())
+  level     String
+  module    String
+  message   String   @db.Text
+  metadata  Json?
+
+  @@map("system_logs")
+}
+
+// Configurações do App (1 único registro esperado)
+model Settings {
+  id           Int      @id @default(1)
+  settingsData Json     // Armazena a estrutura de AppSettings
+  updatedAt    DateTime @updatedAt
+
+  @@map("settings")
+}
+
+model ProfileCandidate {
+  id                 String   @id @default(uuid())
+  username           String   @unique
+  displayName        String
+  probableCategory   String
+  city               String
+  state              String   @default("BA")
+  justification      String   @db.Text
+  source             String
+  discoveredAt       DateTime @default(now())
+  status             String   @default("Pendente")
+  followersEstimated Int?     @default(0)
+  isDemo             Boolean  @default(false)
+
+  @@map("profile_candidates")
+}
+
+model InstagramPost {
+  id        String   @id // ID original da mídia no Instagram (ex: "18090598595275928")
+  caption   String?  @db.Text
+  mediaType String   // IMAGE, VIDEO, CAROUSEL_ALBUM
+  mediaUrl  String?  @db.Text
+  permalink String   @db.Text
+  timestamp DateTime
+  syncedAt  DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("instagram_posts")
+}
