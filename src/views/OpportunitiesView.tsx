@@ -83,9 +83,14 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
   const handleUpdateStatus = async (opp: Opportunity, newStatus: OpportunityStatus) => {
     try {
       const updated = await api.updateOpportunity(opp.id, { status: newStatus });
-      if (activeOpportunity && activeOpportunity.id === opp.id) {
+      
+      // 🔥 NOVA REGRA: Se foi descartada, fecha o menu lateral automaticamente
+      if (newStatus === 'Descartada') {
+        setActiveOpportunity(null);
+      } else if (activeOpportunity && activeOpportunity.id === opp.id) {
         setActiveOpportunity(updated);
       }
+      
       onRefresh();
     } catch (err) {
       console.error(err);

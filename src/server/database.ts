@@ -11,7 +11,7 @@ import {
 
 export const prisma = new PrismaClient();
 
-// Função auxiliar para higienizar caracteres Unicode malformados (ex: emojis quebrados do Instagram)
+// Função auxiliar para higienizar caracteres Unicode malformados
 function sanitizeUnicode<T>(val: T): T {
   if (typeof val === 'string') {
     return (typeof val.toWellFormed === 'function' 
@@ -44,7 +44,6 @@ export class DatabaseService {
         settings.telegram = settings.telegram || {};
         settings.monitoring = settings.monitoring || {};
 
-        // CORREÇÃO: Se o token for nulo, vazio ou contiver os caracteres mascarados (••••), força o uso do .env
         const currentToken = settings.instagram.accessToken || '';
         if ((!currentToken || currentToken.includes('•') || currentToken.includes('*')) && process.env.META_ACCESS_TOKEN) {
           settings.instagram.accessToken = process.env.META_ACCESS_TOKEN;
@@ -102,11 +101,10 @@ export class DatabaseService {
   async updateSettings(newSettings: Partial<AppSettings>): Promise<AppSettings> {
     const current = await this.getSettings();
 
-    // Se o frontend enviar bolinhas ou asteriscos, limpa para forçar uso do .env
     if (newSettings.instagram?.accessToken) {
       const tokenStr = newSettings.instagram.accessToken.trim();
       if (tokenStr.includes('•') || tokenStr.includes('*') || tokenStr.length < 30) {
-        newSettings.instagram.accessToken = ''; // Limpa no banco
+        newSettings.instagram.accessToken = ''; 
       }
     }
 
@@ -326,6 +324,17 @@ export class DatabaseService {
   async insertPublication(
     pub: Omit<Publication, 'id' | 'detectedAt'> | Publication
   ): Promise<{ publication: Publication; created: boolean }> {
+    
+    // 🔥 BLOQUEIO NA ENTRADA: Se o post estiver na blacklist, o sistema ignora e não gasta o Gemini
+    if (pub.externalId) {
+      const isIgnored = await prisma.ignoredPublication.findUnique({
+        where: { externalId: pub.externalId },
+      });
+      if (isIgnored) {
+        return { publication: null as any, created: false };
+      }
+    }
+
     const existing = await prisma.publication.findUnique({
       where: { externalId: pub.externalId },
     });
@@ -571,12 +580,79 @@ export class DatabaseService {
   }
 
   async updateOpportunityStatus(id: string, status: Opportunity['status']): Promise<Opportunity | null> {
+    // 🔥 REGRA: Se foi descartada, apaga a oportunidade e joga o ID na blacklist
+    if (status === 'Descartada') {
+      const existing = await prisma.opportunity.findUnique({
+        where: { id },
+        include: { publication: true },
+      });
+
+      if (existing) {
+        if (existing.publication?.externalId) {
+          await prisma.ignoredPublication.upsert({
+            where: { externalId: existing.publication.externalId },
+            update: { reason: 'discarded' },
+            create: { externalId: existing.publication.externalId, reason: 'discarded' },
+          });
+        }
+        
+        await prisma.contactLog.deleteMany({ where: { opportunityId: id } }).catch(() => {});
+        await prisma.opportunity.delete({ where: { id } }).catch(() => {});
+        if (existing.publicationId) {
+          await prisma.publication.delete({ where: { id: existing.publicationId } }).catch(() => {});
+        }
+        
+        return { ...existing, status: 'Descartada' } as any;
+      }
+    }
+
+    // Fluxo normal para outros status
     await prisma.opportunity.update({
       where: { id },
       data: { status },
     });
     const opps = await this.getOpportunities();
     return opps.find((o) => o.id === id) || null;
+  }
+
+  // 🔥 REGRA: Limpeza programada das oportunidades convertidas antigas (+7 dias)
+  async cleanupExpiredConvertedOpportunities(daysToKeep: number = 7): Promise<number> {
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - daysToKeep);
+
+    const expired = await prisma.opportunity.findMany({
+      where: {
+        status: 'Convertida',
+        detectedAt: { lt: cutoffDate },
+      },
+      include: { publication: true },
+    });
+
+    if (expired.length === 0) return 0;
+
+    const externalIds = expired
+      .map((op) => op.publication?.externalId)
+      .filter((id): id is string => Boolean(id));
+
+    if (externalIds.length > 0) {
+      await prisma.ignoredPublication.createMany({
+        data: externalIds.map((externalId) => ({ externalId, reason: 'converted' })),
+        skipDuplicates: true,
+      });
+    }
+
+    const oppIds = expired.map((op) => op.id);
+    const pubIds = expired
+      .map((op) => op.publicationId)
+      .filter((id): id is string => Boolean(id));
+
+    await prisma.contactLog.deleteMany({ where: { opportunityId: { in: oppIds } } }).catch(() => {});
+    await prisma.opportunity.deleteMany({ where: { id: { in: oppIds } } }).catch(() => {});
+    if (pubIds.length > 0) {
+      await prisma.publication.deleteMany({ where: { id: { in: pubIds } } }).catch(() => {});
+    }
+
+    return expired.length;
   }
 
   async addContactLog(opportunityId: string, log: Omit<ContactLog, 'id'>): Promise<Opportunity | null> {

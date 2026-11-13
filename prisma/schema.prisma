@@ -186,3 +186,10 @@ model InstagramPost {
 
   @@map("instagram_posts")
 }
+
+model IgnoredPublication {
+  id         String   @id @default(cuid())
+  externalId String   @unique
+  reason     String?  // "discarded" ou "converted"
+  createdAt  DateTime @default(now())
+}

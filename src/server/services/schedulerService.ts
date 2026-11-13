@@ -16,51 +16,34 @@ export interface SchedulerStatus {
   nextRunAt: string | null;
 }
 
-/**
- * Converte um intervalo em minutos para uma expressão cron padrão com espaçamento correto
- */
 export function getCronExpressionForMinutes(intervalMinutes: number): string {
-  if (!intervalMinutes || intervalMinutes < 1) {
-    return '*/30 * * * *'; // Padrão de segurança: 30 minutos
-  }
-  if (intervalMinutes < 60) {
-    return `*/${intervalMinutes} * * * *`;
-  }
+  if (!intervalMinutes || intervalMinutes < 1) return '*/30 * * * *';
+  if (intervalMinutes < 60) return `*/${intervalMinutes} * * * *`;
   const hours = Math.floor(intervalMinutes / 60);
-  if (hours <= 1) {
-    return '0 * * * *'; // A cada 1 hora no minuto zero
-  }
-  if (hours < 24) {
-    return `0 */${hours} * * *`; // A cada N horas
-  }
-  return '0 0 * * *'; // Diário à meia-noite
+  if (hours <= 1) return '0 * * * *';
+  if (hours < 24) return `0 */${hours} * * *`;
+  return '0 0 * * *';
 }
 
 export class SchedulerService {
   private cronTask: ScheduledTask | null = null;
+  private cleanupTask: ScheduledTask | null = null;
   private currentCronExpression: string | null = null;
   private isEnabled: boolean = false;
   private currentIntervalMinutes: number = 30;
 
-  /**
-   * Inicializa o agendador com base nas configurações persistidas no PostgreSQL via Prisma
-   */
   public async init(): Promise<void> {
     await this.reload(true);
   }
 
-  /**
-   * Recria ou atualiza o agendador se as configurações sofrerem mutação
-   */
-    public async reload(force: boolean = false): Promise<void> {
+  public async reload(force: boolean = false): Promise<void> {
     const settings = await db.getSettings();
     const autoScheduled = !!settings.monitoring?.autoScheduled;
     const intervalMinutes = Number(settings.monitoring?.intervalMinutes) || 30;
     
-    // 🔥 ALTERAÇÃO: Força o cron para rodar exatamente às 09:00, 12:00, 16:00 e 19:00
+    // Força o cron para rodar exatamente às 09:00, 12:00, 16:00 e 19:00
     const cronExpression = '0 9,12,16,19 * * *'; 
 
-    // Se nada mudou e já está ativo, evita recriação desnecessária de tarefas
     if (
       !force &&
       this.cronTask &&
@@ -87,28 +70,47 @@ export class SchedulerService {
       return;
     }
 
-    if (!cron.validate(cronExpression)) {
-      console.warn(`[Radar Vibz Scheduler] Expressão cron "${cronExpression}" inválida. Usando padrão */30.`);
-      this.currentCronExpression = '*/30 * * * *';
-    }
-
     try {
-      this.cronTask = cron.schedule(this.currentCronExpression, async () => {
-        console.log(`[Radar Vibz Scheduler] Disparando ciclo agendado em ${new Date().toISOString()}...`);
-        try {
-          // Executa APENAS o ciclo de monitoramento base do sistema unificado
-          await monitoringEngine.runCycleNow(true);
-        } catch (err) {
-          console.error('[Radar Vibz Scheduler] Falha na execução do ciclo agendado:', err);
-        }
-      });
+      // 1. TAREFA PRINCIPAL: Varredura dos perfis
+      this.cronTask = cron.schedule(
+        this.currentCronExpression, 
+        async () => {
+          console.log(`[Radar Vibz Scheduler] Disparando ciclo agendado em ${new Date().toISOString()}...`);
+          try {
+            await monitoringEngine.runCycleNow(true);
+          } catch (err) {
+            console.error('[Radar Vibz Scheduler] Falha na execução do ciclo agendado:', err);
+          }
+        },
+        { timezone: 'America/Bahia' }
+      );
+
+      // 2. TAREFA SECUNDÁRIA: Limpeza do CRM (Roda todos os dias às 03:00 da madrugada)
+      this.cleanupTask = cron.schedule(
+        '0 3 * * *',
+        async () => {
+          try {
+            const removed = await db.cleanupExpiredConvertedOpportunities(7);
+            if (removed > 0) {
+              await db.logSystem(
+                'INFO',
+                'MONITORING',
+                `Limpeza automática: ${removed} oportunidades convertidas (+7 dias) arquivadas na blacklist e removidas.`
+              );
+            }
+          } catch (err) {
+            console.error('[Radar Vibz Scheduler] Erro na limpeza de convertidas:', err);
+          }
+        },
+        { timezone: 'America/Bahia' }
+      );
 
       await db.logSystem(
         'INFO',
         'MONITORING',
         `Agendador de monitoramento ativado: intervalo ${intervalMinutes}m (cron: "${this.currentCronExpression}").`
       );
-      console.log(`[Radar Vibz Scheduler] Agendador ativo com cron "${this.currentCronExpression}" (${intervalMinutes} min).`);
+      console.log(`[Radar Vibz Scheduler] Agendador ativo com cron "${this.currentCronExpression}" no fuso America/Bahia.`);
     } catch (err) {
       await db.logSystem(
         'ERROR',
@@ -119,19 +121,17 @@ export class SchedulerService {
     }
   }
 
-  /**
-   * Interrompe a tarefa de agendamento em execução
-   */
   public stop(): void {
     if (this.cronTask) {
       this.cronTask.stop();
       this.cronTask = null;
     }
+    if (this.cleanupTask) {
+      this.cleanupTask.stop();
+      this.cleanupTask = null;
+    }
   }
 
-  /**
-   * Obtém o status operacional do agendador
-   */
   public async getStatus(): Promise<SchedulerStatus> {
     const settings = await db.getSettings();
     return {
