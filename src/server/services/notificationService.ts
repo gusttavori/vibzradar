@@ -4,9 +4,79 @@
  */
 
 import { db } from '../database';
-import { Opportunity } from '../types/radar';
+import { Opportunity } from '../../types/radar';
+
+function escapeHtml(text: string | null | undefined): string {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function stripHtml(html: string): string {
+  return html
+    .replace(/<[^>]*>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
 
 export class NotificationService {
+  /**
+   * Envia mensagem via API do Telegram em HTML com fallback automático para texto puro
+   */
+  private async sendTelegramMessage(
+    botToken: string,
+    chatId: string,
+    htmlText: string,
+    disableWebPagePreview: boolean = false
+  ): Promise<boolean> {
+    const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: htmlText,
+          parse_mode: 'HTML',
+          disable_web_page_preview: disableWebPagePreview,
+        }),
+      });
+
+      if (response.ok) {
+        return true;
+      }
+
+      const errData = await response.json().catch(() => ({}));
+      console.warn(`[Telegram Error] Falha HTML para Chat ID ${chatId}:`, errData);
+
+      // Fallback: se houver erro 400 de entidade/formatação, reenvia imediatamente em texto puro
+      if (response.status === 400) {
+        const plainResponse = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: stripHtml(htmlText),
+            disable_web_page_preview: disableWebPagePreview,
+          }),
+        });
+
+        if (plainResponse.ok) {
+          console.log(`[Telegram] Mensagem reenviada em texto puro para Chat ID ${chatId}.`);
+          return true;
+        }
+      }
+
+      return false;
+    } catch (err) {
+      console.error(`[Telegram Error] Erro de rede ao notificar ${chatId}:`, err);
+      return false;
+    }
+  }
+
   /**
    * Dispara alerta formatado no Telegram para todos os Chat IDs cadastrados
    */
@@ -22,7 +92,6 @@ export class NotificationService {
         return false;
       }
 
-      // Separa múltiplos IDs informados por vírgula no .env ou no banco
       const chatIds = settings.telegram.chatId
         .split(',')
         .map((id) => id.trim())
@@ -30,59 +99,48 @@ export class NotificationService {
 
       if (chatIds.length === 0) return false;
 
-      const relevanceEmoji =
+      const relevanceLabel =
         opportunity.relevance === 'high'
-          ? '🔴 *ALTA RELEVÂNCIA*'
+          ? '🔴 <b>ALTA RELEVÂNCIA</b>'
           : opportunity.relevance === 'medium'
-          ? '🟡 *MÉDIA RELEVÂNCIA*'
-          : '🟢 *BAIXA RELEVÂNCIA*';
+          ? '🟡 <b>MÉDIA RELEVÂNCIA</b>'
+          : '🟢 <b>BAIXA RELEVÂNCIA</b>';
 
-      const messageText = [
-        `🚨 *NOVA OPORTUNIDADE DETECTADA* 🚨`,
+      const cleanUsername = (opportunity.username || '').replace(/^@/, '');
+
+      const messageHtml = [
+        `🚨 <b>NOVA OPORTUNIDADE DETECTADA</b> 🚨`,
         ``,
-        `📍 *Evento:* ${opportunity.eventName}`,
-        `🏢 *Perfil:* @${opportunity.username}`,
-        `📊 *Relevância:* ${relevanceEmoji}`,
-        `🏷️ *Categoria:* ${opportunity.category}`,
-        `🏙️ *Local:* ${opportunity.venue || 'N/I'} (${opportunity.city})`,
-        opportunity.eventDate ? `📅 *Data:* ${opportunity.eventDate}` : null,
+        `📍 <b>Evento:</b> ${escapeHtml(opportunity.eventName)}`,
+        `🏢 <b>Perfil:</b> @${escapeHtml(cleanUsername)}`,
+        `📊 <b>Relevância:</b> ${relevanceLabel}`,
+        `🏷️ <b>Categoria:</b> ${escapeHtml(opportunity.category)}`,
+        `🏙️ <b>Local:</b> ${escapeHtml(opportunity.venue || 'N/I')} (${escapeHtml(opportunity.city)})`,
+        opportunity.eventDate ? `📅 <b>Data:</b> ${escapeHtml(opportunity.eventDate)}` : null,
         ``,
-        `💡 *Oportunidade Comercial:*`,
-        `${opportunity.commercialPotential || 'Não especificada'}`,
+        `💡 <b>Oportunidade Comercial:</b>`,
+        `${escapeHtml(opportunity.commercialPotential || 'Não especificada')}`,
         ``,
-        `🎯 *Ação Sugerida:*`,
-        `${opportunity.suggestedAction || 'Verificar publicação no Radar Vibz'}`,
+        `🎯 <b>Ação Sugerida:</b>`,
+        `${escapeHtml(opportunity.suggestedAction || 'Verificar publicação no Radar Vibz')}`,
         ``,
-        opportunity.originalUrl ? `🔗 [Ver publicação original no Instagram](${opportunity.originalUrl})` : null,
+        opportunity.originalUrl
+          ? `🔗 <a href="${escapeHtml(opportunity.originalUrl)}">Ver publicação original no Instagram</a>`
+          : null,
       ]
-        .filter(Boolean)
+        .filter((line) => line !== null)
         .join('\n');
 
       let successCount = 0;
 
       for (const chatId of chatIds) {
-        try {
-          const url = `https://api.telegram.org/bot${settings.telegram.botToken}/sendMessage`;
-          const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: chatId,
-              text: messageText,
-              parse_mode: 'Markdown',
-              disable_web_page_preview: false,
-            }),
-          });
-
-          if (response.ok) {
-            successCount++;
-          } else {
-            const errData = await response.json();
-            console.warn(`[Telegram Error] Falha ao enviar para Chat ID ${chatId}:`, errData);
-          }
-        } catch (err) {
-          console.error(`[Telegram Error] Erro de rede ao notificar ${chatId}:`, err);
-        }
+        const sent = await this.sendTelegramMessage(
+          settings.telegram.botToken,
+          chatId,
+          messageHtml,
+          false
+        );
+        if (sent) successCount++;
       }
 
       if (successCount > 0) {
@@ -100,37 +158,37 @@ export class NotificationService {
   /**
    * Envia uma mensagem de teste para todos os destinatários configurados
    */
-  async sendTestNotification(): Promise<{ success: boolean; message: string }> {
+  async sendTestNotification(
+    customBotToken?: string,
+    customChatId?: string
+  ): Promise<{ success: boolean; message: string }> {
     try {
       const settings = await db.getSettings();
+      const botToken =
+        customBotToken && !customBotToken.includes('•')
+          ? customBotToken.trim()
+          : settings.telegram.botToken;
+      const rawChatIds = customChatId?.trim() || settings.telegram.chatId;
 
-      if (!settings.telegram.botToken || !settings.telegram.chatId) {
+      if (!botToken || !rawChatIds) {
         return {
           success: false,
           message: 'Token ou Chat ID(s) do Telegram não configurados.',
         };
       }
 
-      const chatIds = settings.telegram.chatId
+      const chatIds = rawChatIds
         .split(',')
         .map((id) => id.trim())
         .filter(Boolean);
 
       let successCount = 0;
+      const testHtml =
+        '⚡ <b>Radar Vibz</b>: Teste de integração do Telegram efetuado com sucesso! Múltiplos destinatários ativos.';
 
       for (const chatId of chatIds) {
-        const url = `https://api.telegram.org/bot${settings.telegram.botToken}/sendMessage`;
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: chatId,
-            text: '⚡ *Radar Vibz*: Teste de integração do Telegram efetuado com sucesso! Múltiplos destinatários ativos.',
-            parse_mode: 'Markdown',
-          }),
-        });
-
-        if (response.ok) successCount++;
+        const sent = await this.sendTelegramMessage(botToken, chatId, testHtml, true);
+        if (sent) successCount++;
       }
 
       return {

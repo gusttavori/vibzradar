@@ -1,11 +1,13 @@
 /**
  * Radar Vibz - PublicationAnalysisService
- * Análise de publicações com Google Gemini API (@google/genai)
+ * Análise de publicações com Google Gemini API (@google/genai) + Fallback Heurístico
  */
 
 import { GoogleGenAI, Type } from '@google/genai';
 import { AIAnalysisResult } from '../../types/radar';
 import { db } from '../database';
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class PublicationAnalysisService {
   private ai: GoogleGenAI | null = null;
@@ -19,9 +21,9 @@ export class PublicationAnalysisService {
           apiKey,
           httpOptions: {
             headers: {
-              'User-Agent': 'aistudio-build'
-            }
-          }
+              'User-Agent': 'aistudio-build',
+            },
+          },
         });
       } catch (err) {
         console.warn('Could not initialize GoogleGenAI client:', err);
@@ -60,7 +62,7 @@ export class PublicationAnalysisService {
         commercial_opportunity: 'Sem oportunidade identificável.',
         suggested_action: 'Manter arquivado.',
         confidence: 0.95,
-        missing_information: []
+        missing_information: [],
       };
       this.cache.set(cacheKey, emptyResult);
       return emptyResult;
@@ -69,8 +71,7 @@ export class PublicationAnalysisService {
     const settings = await db.getSettings();
 
     if (this.ai && settings.gemini.enabled) {
-      try {
-        const prompt = `Analise a seguinte publicação de entretenimento do Instagram para o Radar Vibz (ferramenta de inteligência comercial do Vibz Eventos no Sudoeste da Bahia).
+      const prompt = `Analise a seguinte publicação de entretenimento do Instagram para o Radar Vibz (ferramenta de inteligência comercial do Vibz Eventos no Sudoeste da Bahia).
 Identifique se anuncia um evento real, show, festa, festival ou programação relevante, e avalie a oportunidade comercial para o Vibz (venda de ingressos, divulgação de programação, parcerias com produtores).
 
 REGRAS DE FILTRAGEM RIGOROSAS (IMPORTANTE):
@@ -93,65 +94,80 @@ DADOS DA PUBLICAÇÃO:
 ${safeCaption}
 """`;
 
-        const response = await this.ai.models.generateContent({
-          model: 'gemini-3.8-flash', 
-          contents: prompt,
-          config: {
-            systemInstruction: 'Você é o motor de inteligência artificial do Radar Vibz...',
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                is_event: { type: Type.BOOLEAN },
-                is_opportunity: { type: Type.BOOLEAN },
-                category: { type: Type.STRING },
-                relevance: { type: Type.STRING },
-                event_name: { type: Type.STRING, nullable: true },
-                event_date: { type: Type.STRING, nullable: true },
-                event_time: { type: Type.STRING, nullable: true },
-                venue: { type: Type.STRING, nullable: true },
-                city: { type: Type.STRING, nullable: true },
-                state: { type: Type.STRING, nullable: true },
-                artists: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING }
-                },
-                organizer: { type: Type.STRING, nullable: true },
-                summary: { type: Type.STRING },
-                commercial_opportunity: { type: Type.STRING },
-                suggested_action: { type: Type.STRING },
-                confidence: { type: Type.NUMBER },
-                missing_information: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING }
-                }
-              },
-              required: [
-                'is_event',
-                'is_opportunity',
-                'category',
-                'relevance',
-                'summary',
-                'commercial_opportunity',
-                'suggested_action',
-                'confidence',
-                'missing_information'
-              ]
-            }
-          }
-        });
+      const primaryModel = settings.gemini.model || 'gemini-2.5-flash';
+      const modelsToTry = Array.from(new Set([primaryModel, 'gemini-2.5-flash', 'gemini-2.0-flash']));
 
-        const textOutput = response.text;
-        if (textOutput) {
-          const parsed = JSON.parse(textOutput) as AIAnalysisResult;
-          const rel = (parsed.relevance || '').toLowerCase();
-          parsed.relevance = rel === 'high' ? 'high' : rel === 'medium' ? 'medium' : 'low';
-          this.cache.set(cacheKey, parsed);
-          return parsed;
+      for (const modelName of modelsToTry) {
+        try {
+          const response = await this.ai.models.generateContent({
+            model: modelName,
+            contents: prompt,
+            config: {
+              temperature: settings.gemini.temperature ?? 0.2,
+              systemInstruction:
+                'Você é o motor de inteligência artificial do Radar Vibz, especialista em prospecção comercial de eventos musicais e entretenimento na Bahia.',
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  is_event: { type: Type.BOOLEAN },
+                  is_opportunity: { type: Type.BOOLEAN },
+                  category: { type: Type.STRING },
+                  relevance: { type: Type.STRING },
+                  event_name: { type: Type.STRING, nullable: true },
+                  event_date: { type: Type.STRING, nullable: true },
+                  event_time: { type: Type.STRING, nullable: true },
+                  venue: { type: Type.STRING, nullable: true },
+                  city: { type: Type.STRING, nullable: true },
+                  state: { type: Type.STRING, nullable: true },
+                  artists: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                  organizer: { type: Type.STRING, nullable: true },
+                  summary: { type: Type.STRING },
+                  commercial_opportunity: { type: Type.STRING },
+                  suggested_action: { type: Type.STRING },
+                  confidence: { type: Type.NUMBER },
+                  missing_information: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                },
+                required: [
+                  'is_event',
+                  'is_opportunity',
+                  'category',
+                  'relevance',
+                  'summary',
+                  'commercial_opportunity',
+                  'suggested_action',
+                  'confidence',
+                  'missing_information',
+                ],
+              },
+            },
+          });
+
+          const textOutput = response.text;
+          if (textOutput) {
+            const parsed = JSON.parse(textOutput) as AIAnalysisResult;
+            const rel = (parsed.relevance || '').toLowerCase();
+            parsed.relevance = rel === 'high' ? 'high' : rel === 'medium' ? 'medium' : 'low';
+            this.cache.set(cacheKey, parsed);
+            return parsed;
+          }
+        } catch (err: any) {
+          const status = err?.status || err?.code;
+          console.warn(`[Gemini Warning] Falha com modelo "${modelName}" (status ${status || 'N/A'}):`, err?.message || err);
+          // Aguarda 1.5s antes de tentar o próximo modelo reserva em caso de pico (503) ou rate limit (429)
+          if (status === 503 || status === 429) {
+            await sleep(1500);
+          }
         }
-      } catch (err) {
-        console.warn('Gemini API call returned error, falling back to heuristic engine:', err);
       }
+
+      console.warn('Gemini API indisponível após retentativas, acionando motor heurístico.');
     }
 
     const fallback = this.heuristicAnalysis({ ...params, caption: safeCaption });
@@ -198,7 +214,7 @@ ${safeCaption}
         commercial_opportunity: 'Nenhuma oportunidade imediata identificada.',
         suggested_action: 'Manter em histórico sem contato comercial.',
         confidence: 0.94,
-        missing_information: []
+        missing_information: [],
       };
     }
 
@@ -207,15 +223,25 @@ ${safeCaption}
     const isBarLive = text.includes('acústico') || text.includes('música ao vivo') || text.includes('voz e violão') || text.includes('sextou');
 
     let eventDate: string | null = null;
-    const dateRegex = /(\d{1,2})[\/\s]+(?:de\s+)?(janeiro|fevereiro|março|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro|\d{1,2})/i;
+    const dateRegex =
+      /(\d{1,2})[\/\s]+(?:de\s+)?(janeiro|fevereiro|março|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro|\d{1,2})/i;
     const match = text.match(dateRegex);
     if (match) {
       const day = match[1].padStart(2, '0');
       const monthStr = match[2].toLowerCase();
       const monthMap: Record<string, string> = {
-        'janeiro': '01', 'fevereiro': '02', 'março': '03', 'abril': '04',
-        'maio': '05', 'junho': '06', 'julho': '07', 'agosto': '08',
-        'setembro': '09', 'outubro': '10', 'novembro': '11', 'dezembro': '12'
+        janeiro: '01',
+        fevereiro: '02',
+        março: '03',
+        abril: '04',
+        maio: '05',
+        junho: '06',
+        julho: '07',
+        agosto: '08',
+        setembro: '09',
+        outubro: '10',
+        novembro: '11',
+        dezembro: '12',
       };
       const month = monthMap[monthStr] || match[2].padStart(2, '0');
       const currentYear = new Date().getFullYear();
@@ -251,10 +277,11 @@ ${safeCaption}
         artists: [],
         organizer: params.username,
         summary: `Evento de grande apelo identificado na publicação de @${params.username}. Abertura de ingressos mencionada.`,
-        commercial_opportunity: 'Alta prioridade: oferecer intermediação de venda de ingressos ou patrocínio oficial de divulgação no Vibz.',
+        commercial_opportunity:
+          'Alta prioridade: oferecer intermediação de venda de ingressos ou patrocínio oficial de divulgação no Vibz.',
         suggested_action: 'Contatar a produção via WhatsApp ou Direct apresentando a proposta comercial Vibz.',
         confidence: 0.91,
-        missing_information: eventDate ? [] : ['Data exata do evento']
+        missing_information: eventDate ? [] : ['Data exata do evento'],
       };
     }
 
@@ -273,10 +300,11 @@ ${safeCaption}
         artists: [],
         organizer: params.username,
         summary: `Programação musical ou noite temática identificada no perfil @${params.username}.`,
-        commercial_opportunity: 'Oportunidade para cadastrar na agenda semanal do Vibz e propor plano recorrente para estabelecimentos.',
+        commercial_opportunity:
+          'Oportunidade para cadastrar na agenda semanal do Vibz e propor plano recorrente para estabelecimentos.',
         suggested_action: 'Cadastrar no catálogo do Vibz e convidar o estabelecimento para painel de parceiros.',
         confidence: 0.88,
-        missing_information: []
+        missing_information: [],
       };
     }
 
@@ -297,7 +325,7 @@ ${safeCaption}
       commercial_opportunity: 'Sem oportunidade comercial identificada.',
       suggested_action: 'Nenhuma ação necessária.',
       confidence: 0.92,
-      missing_information: []
+      missing_information: [],
     };
   }
 }
