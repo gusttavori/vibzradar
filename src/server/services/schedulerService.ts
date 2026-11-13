@@ -52,11 +52,13 @@ export class SchedulerService {
   /**
    * Recria ou atualiza o agendador se as configurações sofrerem mutação
    */
-  public async reload(force: boolean = false): Promise<void> {
+    public async reload(force: boolean = false): Promise<void> {
     const settings = await db.getSettings();
     const autoScheduled = !!settings.monitoring?.autoScheduled;
     const intervalMinutes = Number(settings.monitoring?.intervalMinutes) || 30;
-    const cronExpression = getCronExpressionForMinutes(intervalMinutes);
+    
+    // 🔥 ALTERAÇÃO: Força o cron para rodar exatamente às 09:00, 12:00, 16:00 e 19:00
+    const cronExpression = '0 9,12,16,19 * * *'; 
 
     // Se nada mudou e já está ativo, evita recriação desnecessária de tarefas
     if (

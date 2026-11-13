@@ -156,7 +156,8 @@ export class MetaInstagramProvider implements InstagramProvider {
         
         const payload = {
           username: [cleanUsername],
-          resultsLimit: 15
+          // 🔥 ALTERAÇÃO: Reduzido de 15 para 3 para poupar créditos!
+          resultsLimit: 3 
         };
 
         const res = await fetch(runUrl, {
