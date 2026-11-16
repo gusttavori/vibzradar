@@ -1,6 +1,6 @@
 /**
  * Radar Vibz - PublicationAnalysisService
- * Análise de publicações com Google Gemini API (@google/genai) + Fallback Heurístico
+ * Análise de publicações com Google Gemini API (@google/genai) + Fallback Heurístico Avançado
  */
 
 import { GoogleGenAI, Type } from '@google/genai';
@@ -31,16 +31,21 @@ export class PublicationAnalysisService {
     }
   }
 
+  public clearCache(): void {
+    this.cache.clear();
+  }
+
   async analyzePublication(params: {
     caption: string;
     username: string;
     category?: string;
     city?: string;
     publishedAt: string;
+    bypassCache?: boolean;
   }): Promise<AIAnalysisResult> {
     const safeCaption = (params.caption || '').trim();
     const cacheKey = `${params.username}:${safeCaption}`;
-    if (this.cache.has(cacheKey)) {
+    if (!params.bypassCache && this.cache.has(cacheKey)) {
       return this.cache.get(cacheKey)!;
     }
 
@@ -72,17 +77,17 @@ export class PublicationAnalysisService {
 
     if (this.ai && settings.gemini.enabled) {
       const prompt = `Analise a seguinte publicação de entretenimento do Instagram para o Radar Vibz (ferramenta de inteligência comercial do Vibz Eventos no Sudoeste da Bahia).
-Identifique se anuncia um evento real, show, festa, festival ou programação relevante, e avalie a oportunidade comercial para o Vibz (venda de ingressos, divulgação de programação, parcerias com produtores).
+Identifique se anuncia um evento, show, festa, festival, gravação de audiovisual com público, abertura de vendas, virada de lote ou programação musical, e avalie a oportunidade comercial para o Vibz (divulgação, venda de ingressos, cobertura ou parcerias).
 
-REGRAS DE FILTRAGEM RIGOROSAS (IMPORTANTE):
-1. IGNORE completamente publicações de rotina diária, cardápios de restaurantes, pratos do dia, promoções comerciais comuns (ex: "almoço executivo", "desconto"), mensagens motivacionais ou posts genéricos de marketing institucional do estabelecimento.
-2. NUNCA assuma que a data de publicação é a data do evento. Extraia a data em que o evento realmente ocorrerá. Se a legenda diz "Sexta 30/10" ou "21 de Novembro", extraia a data futura correspondente. Se não houver data explícita, retorne null.
-3. NUNCA invente atrações, artistas, locais ou horários que não estejam no texto.
-4. Se for agradecimento pós-evento ("Que noite linda", "Obrigado a quem foi"), NÃO é evento futuro (is_event: false, is_opportunity: false, category: "Retrospectiva").
-5. Relevância:
-   - "high": festival, show confirmado com data definida, festa com venda de ingressos ou anúncio de lotes, eventos públicos de grande porte.
-   - "medium": programação semanal de bar, música ao vivo, anúncio prévio com informações relevantes.
-   - "low": posts comuns, marketing comum de estabelecimento, cardápios, memes, retrospectivas.
+REGRAS DE CLASSIFICAÇÃO:
+1. IGNORE publicações puramente de rotina diária, cardápios de almoço, agradecimentos pós-evento ("que noite linda foi", "obrigado a todos que foram", "tbt") ou notas técnicas.
+2. NUNCA assuma que a data de publicação é a data do evento. Extraia a data em que o evento ocorrerá (ex: "18 de novembro", "sexta-feira 13", "amanhã" relativo à data de postagem ${params.publishedAt}). Se não houver data explícita, retorne null.
+3. NUNCA invente atrações, locais ou horários que não estejam no texto.
+4. Classificação de Relevância (seja proativo para detectar oportunidades comerciais):
+   - "high": show, festival, festa, gravação de audiovisual aberta ao público, anúncio de atrações, abertura de vendas, virada de lote, promoção relâmpago de ingressos, divulgação de setores/pontos de venda.
+   - "medium": programação semanal de bar/casa de shows, música ao vivo, "hoje tem", "é amanhã", prévia de evento sem detalhes completos.
+   - "low": posts institucionais sem evento, cardápios, retrospectivas pós-evento.
+5. Sempre que relevance for "high" ou "medium", defina is_event: true e is_opportunity: true.
 
 DADOS DA PUBLICAÇÃO:
 - Perfil: @${params.username}
@@ -105,7 +110,7 @@ ${safeCaption}
             config: {
               temperature: settings.gemini.temperature ?? 0.2,
               systemInstruction:
-                'Você é o motor de inteligência artificial do Radar Vibz, especialista em prospecção comercial de eventos musicais e entretenimento na Bahia.',
+                'Você é o motor de inteligência comercial do Radar Vibz, especializado em detectar shows, festas, aberturas de vendas e eventos musicais na Bahia.',
               responseMimeType: 'application/json',
               responseSchema: {
                 type: Type.OBJECT,
@@ -154,13 +159,16 @@ ${safeCaption}
             const parsed = JSON.parse(textOutput) as AIAnalysisResult;
             const rel = (parsed.relevance || '').toLowerCase();
             parsed.relevance = rel === 'high' ? 'high' : rel === 'medium' ? 'medium' : 'low';
+            if (parsed.relevance === 'high' || parsed.relevance === 'medium') {
+              parsed.is_event = true;
+              parsed.is_opportunity = true;
+            }
             this.cache.set(cacheKey, parsed);
             return parsed;
           }
         } catch (err: any) {
           const status = err?.status || err?.code;
           console.warn(`[Gemini Warning] Falha com modelo "${modelName}" (status ${status || 'N/A'}):`, err?.message || err);
-          // Aguarda 1.5s antes de tentar o próximo modelo reserva em caso de pico (503) ou rate limit (429)
           if (status === 503 || status === 429) {
             await sleep(1500);
           }
@@ -188,19 +196,17 @@ ${safeCaption}
       text.includes('obrigado a todos') ||
       text.includes('que energia linda foi') ||
       text.includes('edição passada') ||
-      text.includes('clipe novo no ar') ||
       text.includes('tbt') ||
       text.includes('manutenção preventiva') ||
       text.includes('almoço executivo') ||
       text.includes('cardápio') ||
-      text.includes('prato do dia') ||
-      text.includes('expediente');
+      text.includes('prato do dia');
 
     if (isRetrospective) {
       return {
         is_event: false,
         is_opportunity: false,
-        category: text.includes('manutenção') ? 'Conteúdo institucional' : 'Retrospectiva / Marketing rotineiro',
+        category: 'Retrospectiva / Institucional',
         relevance: 'low',
         event_name: null,
         event_date: null,
@@ -213,14 +219,61 @@ ${safeCaption}
         summary: 'Publicação de registro pós-evento, cardápio ou comunicado interno sem chamada de evento futuro.',
         commercial_opportunity: 'Nenhuma oportunidade imediata identificada.',
         suggested_action: 'Manter em histórico sem contato comercial.',
-        confidence: 0.94,
+        confidence: 0.9,
         missing_information: [],
       };
     }
 
-    const isFestival = text.includes('festival') || text.includes('summer fest') || text.includes('micareta');
-    const isParty = text.includes('festa') || text.includes('calourada') || text.includes('save the date') || text.includes('baile');
-    const isBarLive = text.includes('acústico') || text.includes('música ao vivo') || text.includes('voz e violão') || text.includes('sextou');
+    // Sinais fortes de venda de ingressos, shows e grandes eventos
+    const highCommercialKeywords = [
+      'ingresso',
+      'ingressos',
+      'lote',
+      'virada de lote',
+      'abertura de vendas',
+      'promoção relâmpago',
+      'meu bilhete',
+      'bilheteria',
+      'pontos de venda',
+      'setores',
+      'camarote',
+      'frontstage',
+      'festival',
+      'micareta',
+      'show do',
+      'show de',
+      'confirmado',
+      'confirmados',
+      'gravação do audiovisual',
+      'audiovisual',
+    ];
+
+    // Sinais médios de festas, casas de show e programação local
+    const mediumEventKeywords = [
+      'show',
+      'festa',
+      'arrocha',
+      'revoada',
+      'baile',
+      'calourada',
+      'save the date',
+      'atração',
+      'atrações',
+      'palco',
+      'ao vivo',
+      'acústico',
+      'voz e violão',
+      'sextou',
+      'hoje tem',
+      'é hoje',
+      'é amanhã',
+      'amanhã',
+      'evento',
+      'turnê',
+    ];
+
+    const isHigh = highCommercialKeywords.some((kw) => text.includes(kw));
+    const isMedium = mediumEventKeywords.some((kw) => text.includes(kw));
 
     let eventDate: string | null = null;
     const dateRegex =
@@ -254,42 +307,43 @@ ${safeCaption}
       eventTime = timeMatch[1] ? `${timeMatch[1].padStart(2, '0')}:00` : timeMatch[2];
     }
 
-    let eventName: string | null = null;
-    const firstLine = params.caption.split('\n')[0].replace(/[!🎉☀️💥🚀🌟]/g, '').trim();
-    if (firstLine.length > 5 && firstLine.length < 60) {
-      eventName = firstLine;
-    } else {
-      eventName = isFestival ? 'Festival Regional' : isParty ? 'Festa & Evento' : 'Música ao Vivo';
-    }
+    const firstLine = params.caption
+      .split('\n')[0]
+      .replace(/[^\p{L}\p{N}\s\-:!.,&@]/gu, '')
+      .trim();
+    const eventName =
+      firstLine.length >= 5 && firstLine.length <= 65
+        ? firstLine
+        : `Evento / Programação @${params.username}`;
 
-    if (isFestival || (isParty && text.includes('lote'))) {
+    if (isHigh) {
       return {
         is_event: true,
         is_opportunity: true,
-        category: isFestival ? 'Festival' : 'Festa',
+        category: text.includes('festival') ? 'Festival' : 'Show / Evento',
         relevance: 'high',
         event_name: eventName,
         event_date: eventDate,
         event_time: eventTime || '21:00',
-        venue: params.username.includes('arena') ? 'Arena Sudoeste' : 'Local a confirmar',
+        venue: 'Local a confirmar',
         city: params.city || 'Vitória da Conquista',
         state: 'BA',
         artists: [],
         organizer: params.username,
-        summary: `Evento de grande apelo identificado na publicação de @${params.username}. Abertura de ingressos mencionada.`,
+        summary: `Divulgação comercial ativa de evento/ingressos identificada em @${params.username}.`,
         commercial_opportunity:
-          'Alta prioridade: oferecer intermediação de venda de ingressos ou patrocínio oficial de divulgação no Vibz.',
-        suggested_action: 'Contatar a produção via WhatsApp ou Direct apresentando a proposta comercial Vibz.',
-        confidence: 0.91,
+          'Alta prioridade: evento com venda de ingressos ou campanha ativa. Propor parceria de divulgação e cobertura oficial Vibz.',
+        suggested_action: 'Entrar em contato com a produção via WhatsApp ou Direct imediatamente.',
+        confidence: 0.89,
         missing_information: eventDate ? [] : ['Data exata do evento'],
       };
     }
 
-    if (isParty || isBarLive) {
+    if (isMedium) {
       return {
         is_event: true,
         is_opportunity: true,
-        category: isBarLive ? 'Programação de bar' : 'Divulgação de festa',
+        category: text.includes('bar') || text.includes('acústico') ? 'Programação de bar' : 'Festa / Show',
         relevance: 'medium',
         event_name: eventName,
         event_date: eventDate,
@@ -299,11 +353,11 @@ ${safeCaption}
         state: 'BA',
         artists: [],
         organizer: params.username,
-        summary: `Programação musical ou noite temática identificada no perfil @${params.username}.`,
+        summary: `Anúncio de show, festa ou programação musical identificado no perfil @${params.username}.`,
         commercial_opportunity:
-          'Oportunidade para cadastrar na agenda semanal do Vibz e propor plano recorrente para estabelecimentos.',
-        suggested_action: 'Cadastrar no catálogo do Vibz e convidar o estabelecimento para painel de parceiros.',
-        confidence: 0.88,
+          'Oportunidade comercial para divulgação na agenda do Vibz e abordagem de parceria.',
+        suggested_action: 'Cadastrar evento no Vibz e contatar organizador.',
+        confidence: 0.85,
         missing_information: [],
       };
     }
@@ -324,7 +378,7 @@ ${safeCaption}
       summary: 'Publicação de rotina ou sem chamada direta para evento futuro.',
       commercial_opportunity: 'Sem oportunidade comercial identificada.',
       suggested_action: 'Nenhuma ação necessária.',
-      confidence: 0.92,
+      confidence: 0.85,
       missing_information: [],
     };
   }
